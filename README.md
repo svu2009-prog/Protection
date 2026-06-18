@@ -89,9 +89,9 @@ protection --version
 Скачайте свежую версию `protection.sh` и запустите её:
 
 ```bash
-curl -fsSL -o protection.sh https://raw.githubusercontent.com/svu2009-prog/Protection/main/protection.sh
-chmod +x protection.sh
-./protection.sh
+sudo curl -fsSL -o protection.sh https://raw.githubusercontent.com/svu2009-prog/Protection/main/protection.sh
+sudo chmod +x protection.sh
+sudo ./protection.sh
 ```
 
 Если глобальная команда `/usr/local/bin/protection` старее скачанного скрипта, она будет заменена новой копией.

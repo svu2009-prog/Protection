@@ -18,7 +18,7 @@ NEW_AMNEZIA_PORT=""
 output=""
 check_xui=""
 USE_SUDO=""
-PROTECTION_VERSION="1.0.1"
+PROTECTION_VERSION="1.0.2"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 DOCKER_MENU_VERSION=1
 DOCKER_HELP_VERSION=1
@@ -27,7 +27,7 @@ DOCKER_HELP_VERSION=1
 # КОНФИГУРАЦИЯ ПО УМОЛЧАНИЮ
 # ============================================================
 
-INFO_FILE=./info.txt
+INFO_FILE="$(pwd)/info.txt"
 
 F2B_BANTIME_DEFAULT=3600
 F2B_FINDTIME_DEFAULT=2400
@@ -156,20 +156,19 @@ ensure_global_command() {
 
 # Основная функция для цветного вывода
 color_echo() {
-    local color_code=$1 message=$2 command=$3
+    local color_code=$1 message=$2
     echo -e "\x1B[${color_code}m ${message} \x1B[0m"
-    [[ -n "${command}" ]] && echo -e "\x1B[${color_code}m $(${command}) \x1B[0m"
 }
 
 # Цветные обертки для различных типов сообщений
-black() { color_echo 90 "$1" "$2"; }
-red() { color_echo 91 "$1" "$2"; }
-green() { color_echo 92 "$1" "$2"; }
-yellow() { color_echo 93 "$1" "$2"; }
-blue() { color_echo 94 "$1" "$2"; }
-purple() { color_echo 95 "$1" "$2"; }
-cyan() { color_echo 96 "$1" "$2"; }
-white() { color_echo 97 "$1" "$2"; }
+black() { color_echo 90 "$1"; }
+red() { color_echo 91 "$1"; }
+green() { color_echo 92 "$1"; }
+yellow() { color_echo 93 "$1"; }
+blue() { color_echo 94 "$1"; }
+purple() { color_echo 95 "$1"; }
+cyan() { color_echo 96 "$1"; }
+white() { color_echo 97 "$1"; }
 
 case "${1:-}" in
     -v|--version)
@@ -183,7 +182,7 @@ esac
 
 # Удаление ANSI-кодов
 strip_ansi() {
-    sed -r "s/\x1B\[[0-9;]*[A-Za-z]//g; s/\^\[\[0m//g"
+    sed -r "s/\x1B\[[0-9;]*[A-Za-z]//g"
 }
 
 # Отрисовка интерактивного меню для select_menu.
@@ -470,6 +469,14 @@ validate_ssh_port() {
     validate_port "$1" 1024 65535
 }
 
+# Получение текущего порта SSH из конфигурации
+get_ssh_port() {
+    local port
+    port=$(grep -i '^Port' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | xargs)
+    [[ -z "$port" ]] && port=22
+    echo "$port"
+}
+
 ufw_allow_port() {
     local port=$1
     local proto=$2
@@ -487,7 +494,7 @@ ufw_allow_port() {
             ;;
     esac
 
-    echo "y" | $USE_SUDO ufw allow "$port/$proto" >/dev/null 2>&1 || echo "y" | ufw allow "$port/$proto" >/dev/null 2>&1
+    echo "y" | ${USE_SUDO:+$USE_SUDO }ufw allow "$port/$proto" >/dev/null 2>&1
 }
 
 # Проверка имени пользователя
@@ -554,8 +561,8 @@ validate_password() {
 
 # Отключение UFW, если он активен
 disable_ufw_if_active() {
-    if $USE_SUDO ufw status 2>/dev/null | grep -q 'Status: active'; then
-        $USE_SUDO ufw disable >/dev/null 2>&1
+    if ${USE_SUDO:+$USE_SUDO }ufw status 2>/dev/null | grep -q 'Status: active'; then
+        ${USE_SUDO:+$USE_SUDO }ufw disable >/dev/null 2>&1
     fi
 }
 
@@ -572,7 +579,7 @@ add_user_nopasswd() {
         return
     fi
     
-    echo "$username ALL=(ALL) NOPASSWD:ALL" | tee /etc/sudoers.d/$username >/dev/null
+    echo "$username ALL=(ALL) NOPASSWD:ALL" | tee "/etc/sudoers.d/$username" >/dev/null
     purple "Пользователь $username добавлен в группу для выполнения команд без пароля."
 }
 
@@ -683,6 +690,7 @@ disable_ipv6() {
         green "IPv6 уже отключен во всех интерфейсах."
         
         if [[ "$(prompt_yes_no "Хотите включить IPv6?" "no")" == "yes" ]]; then
+            cp /etc/sysctl.conf /etc/sysctl.conf.bak
             sed -i '/net.ipv6.conf.all.disable_ipv6/d' /etc/sysctl.conf
             sed -i '/net.ipv6.conf.default.disable_ipv6/d' /etc/sysctl.conf
             sed -i '/net.ipv6.conf.lo.disable_ipv6/d' /etc/sysctl.conf
@@ -848,110 +856,48 @@ users_menu() {
                 fi
                 ;;
             3)
-                if select_fail2ban_jail; then
-                    echo "Список jail:"
-                    for j in $FB_JAILS; do
-                        echo "- $j"
-                    done
-                    for j in $FB_JAILS; do
-                        echo "------- Jail: $j -------"
-                        fb_status=$($USE_SUDO fail2ban-client status "$j" 2>/dev/null || fail2ban-client status "$j" 2>/dev/null)
-                        echo "$fb_status"
-                    done
-                fi
+                new_user
                 ;;
             4)
-                if select_fail2ban_jail; then
-                    echo "Список jail:"
-                    for j in $FB_JAILS; do
-                        echo "- $j"
-                    done
-                    for j in $FB_JAILS; do
-                        echo "------- Jail: $j -------"
-                        fb_out=$($USE_SUDO fail2ban-client status "$j" 2>/dev/null || fail2ban-client status "$j" 2>/dev/null)
-                        banned_list=$(echo "$fb_out" | grep -i "Banned IP list" | awk -F':' '{print $2}' | xargs)
-                        if [[ -z "$banned_list" ]]; then
-                            yellow "Забаненных IP в jail $j нет."
-                        else
-                            green "Забаненные IP в jail $j: $banned_list"
-                        fi
-                    done
+                if select_non_system_user; then
+                    echo "Группы пользователя $SELECTED_USER:"
+                    groups "$SELECTED_USER" 2>/dev/null | cut -d: -f2 | xargs
                 fi
                 ;;
             5)
-                if select_fail2ban_jail; then
-                    echo "Список jail:"
-                    for j in $FB_JAILS; do
-                        echo "- $j"
-                    done
-                    for j in $FB_JAILS; do
-                        echo "------- Jail: $j -------"
-                        fb_status=$($USE_SUDO fail2ban-client status "$j" 2>/dev/null || fail2ban-client status "$j" 2>/dev/null)
-                        echo "$fb_status"
-                    done
-                    read -p "Введите IP для разбана: " UNBAN_IP
-                    if [[ -z "$UNBAN_IP" ]]; then
-                        red "IP не указан."
+                if select_non_system_user; then
+                    read -p "Введите имя группы: " TARGET_GROUP
+                    if [[ -z "$TARGET_GROUP" ]]; then
+                        red "Имя группы не указано."
+                    elif ! getent group "$TARGET_GROUP" &>/dev/null; then
+                        red "Группа '$TARGET_GROUP' не существует."
                     else
-                        for j in $FB_JAILS; do
-                            $USE_SUDO fail2ban-client set "$j" unbanip "$UNBAN_IP" 2>/dev/null || fail2ban-client set "$j" unbanip "$UNBAN_IP" 2>/dev/null
-                        done
-                        purple "IP $UNBAN_IP разбанен во всех jail (если был в бане)."
+                        if usermod -aG "$TARGET_GROUP" "$SELECTED_USER"; then
+                            purple "Пользователь $SELECTED_USER добавлен в группу $TARGET_GROUP."
+                        else
+                            red "Ошибка при добавлении пользователя в группу."
+                        fi
                     fi
                 fi
                 ;;
-
-
             6)
-                if select_fail2ban_jail; then
-                    echo "Список jail:"
-                    for j in $FB_JAILS; do
-                        echo "- $j"
-                    done
-                    for j in $FB_JAILS; do
-                        echo "------- Jail: $j -------"
-                        fb_status=$($USE_SUDO fail2ban-client status "$j" 2>/dev/null || fail2ban-client status "$j" 2>/dev/null)
-                        echo "$fb_status"
-                    done
+                if select_non_system_user; then
+                    add_user_nopasswd "$SELECTED_USER"
                 fi
                 ;;
             7)
-                if select_fail2ban_jail; then
-                    echo "Список jail:"
-                    for j in $FB_JAILS; do
-                        echo "- $j"
-                    done
-                    for j in $FB_JAILS; do
-                        echo "------- Jail: $j -------"
-                        fb_out=$($USE_SUDO fail2ban-client status "$j" 2>/dev/null || fail2ban-client status "$j" 2>/dev/null)
-                        banned_list=$(echo "$fb_out" | grep -i "Banned IP list" | awk -F':' '{print $2}' | xargs)
-                        if [[ -z "$banned_list" ]]; then
-                            yellow "Забаненных IP в jail $j нет."
-                        else
-                            green "Забаненные IP в jail $j: $banned_list"
-                        fi
-                    done
+                if select_non_system_user; then
+                    remove_user_nopasswd "$SELECTED_USER"
                 fi
                 ;;
             8)
-                if select_fail2ban_jail; then
-                    echo "Список jail:"
-                    for j in $FB_JAILS; do
-                        echo "- $j"
-                    done
-                    for j in $FB_JAILS; do
-                        echo "------- Jail: $j -------"
-                        fb_status=$($USE_SUDO fail2ban-client status "$j" 2>/dev/null || fail2ban-client status "$j" 2>/dev/null)
-                        echo "$fb_status"
-                    done
-                    read -p "Введите IP для разбана: " UNBAN_IP
-                    if [[ -z "$UNBAN_IP" ]]; then
-                        red "IP не указан."
-                    else
-                        for j in $FB_JAILS; do
-                            $USE_SUDO fail2ban-client set "$j" unbanip "$UNBAN_IP" 2>/dev/null || fail2ban-client set "$j" unbanip "$UNBAN_IP" 2>/dev/null
-                        done
-                        purple "IP $UNBAN_IP разбанен во всех jail (если был в бане)."
+                if select_non_system_user; then
+                    if [[ "$(prompt_yes_no "Удалить пользователя $SELECTED_USER и его домашний каталог?" "no")" == "yes" ]]; then
+                        if userdel -r "$SELECTED_USER" 2>/dev/null; then
+                            purple "Пользователь $SELECTED_USER удален."
+                        else
+                            red "Ошибка при удалении пользователя."
+                        fi
                     fi
                 fi
                 ;;
@@ -1025,7 +971,6 @@ create_user() {
     local groups=$4
     
     green "Пользователь: $username"
-    green "Пароль: $password"
     
     # Создаем пользователя с указанными группами
     if [[ -n "$groups" ]]; then
@@ -1072,12 +1017,14 @@ disable_ping() {
         
         if [[ "$PING_STATUS" == "net.ipv4.icmp_echo_ignore_all = 0" ]]; then
             if [[ "$(prompt_yes_no "Доступ к команде ping включен. Хотите отключить доступ к команде ping?" "no")" == "yes" ]]; then
+                cp /etc/sysctl.conf /etc/sysctl.conf.bak
                 sed -i 's/net.ipv4.icmp_echo_ignore_all .*/net.ipv4.icmp_echo_ignore_all = 1/' /etc/sysctl.conf
                 sysctl -p >/dev/null 2>&1
                 purple "Доступ к команде ping отключен."
             fi
         else
             if [[ "$(prompt_yes_no "Хотите включить доступ к команде ping?" "no")" == "yes" ]]; then
+                cp /etc/sysctl.conf /etc/sysctl.conf.bak
                 sed -i 's/net.ipv4.icmp_echo_ignore_all .*/net.ipv4.icmp_echo_ignore_all = 0/' /etc/sysctl.conf
                 sysctl -p >/dev/null 2>&1
                 purple "Доступ к команде ping включен."
@@ -1108,6 +1055,7 @@ disable_root_ssh() {
     
     if [[ "$ROOT_SSH_STATUS" == "no" ]]; then
         if [[ "$(prompt_yes_no "Вход root по SSH отключен. Хотите включить вход root по SSH?" "no")" == "yes" ]]; then
+            cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak
             if grep -qi '^\s*PermitRootLogin' /etc/ssh/sshd_config; then
                 sed -i 's/^\s*PermitRootLogin.*/PermitRootLogin yes/I' /etc/ssh/sshd_config
             else
@@ -1118,6 +1066,7 @@ disable_root_ssh() {
         fi
     else
         if [[ "$(prompt_yes_no "Хотите отключить вход root по SSH?" "no")" == "yes" ]]; then
+            cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak
             if grep -qi '^\s*PermitRootLogin' /etc/ssh/sshd_config; then
                 sed -i 's/^\s*PermitRootLogin.*/PermitRootLogin no/I' /etc/ssh/sshd_config
             else
@@ -1132,9 +1081,7 @@ disable_root_ssh() {
 
 # Изменение порта SSH
 change_port_ssh() {
-    OLD_SSH_PORT=$(grep -i '^Port' /etc/ssh/sshd_config 2>/dev/null)
-    CURRENT_SSH_PORT=$(echo "$OLD_SSH_PORT" | awk -F' ' '{print $2}' | xargs)
-    [[ -z "$CURRENT_SSH_PORT" ]] && CURRENT_SSH_PORT=22
+    CURRENT_SSH_PORT=$(get_ssh_port)
     
     if [[ "$(prompt_yes_no "Порт SSH = $CURRENT_SSH_PORT, хотите изменить его?" "no")" == "no" ]]; then
         return
@@ -1151,6 +1098,7 @@ change_port_ssh() {
                 continue
             fi
             # Изменяем порт в конфигурации SSH
+            cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak
             if grep -q "^Port " /etc/ssh/sshd_config; then
                 sed -i "s/^Port .*/Port ${NEW_SSH_PORT}/" /etc/ssh/sshd_config
             else
@@ -1190,7 +1138,7 @@ seting_ufw() {
         apt install -yq ufw
     fi
     
-    CHECK_UFW=$($USE_SUDO ufw status 2>/dev/null || ufw status)
+    CHECK_UFW=$(${USE_SUDO:+$USE_SUDO }ufw status 2>/dev/null)
     
     if [[ "$CHECK_UFW" == "Status: inactive" ]]; then
         if [[ "$(prompt_yes_no "Хотите включить и настроить ufw?" "no")" == "no" ]]; then
@@ -1199,12 +1147,10 @@ seting_ufw() {
         fi
         
         disable_ufw_if_active
-        echo "y" | $USE_SUDO ufw reset >/dev/null 2>&1 || echo "y" | ufw reset >/dev/null 2>&1
+        echo "y" | ${USE_SUDO:+$USE_SUDO }ufw reset >/dev/null 2>&1
         
         # Получаем текущий порт SSH
-        OLD_SSH_PORT=$(grep -i '^Port' /etc/ssh/sshd_config 2>/dev/null)
-        CURRENT_SSH_PORT=$(echo "$OLD_SSH_PORT" | awk -F' ' '{print $2}' | xargs)
-        [[ -z "$CURRENT_SSH_PORT" ]] && CURRENT_SSH_PORT=22
+        CURRENT_SSH_PORT=$(get_ssh_port)
         
         # Разрешаем стандартные порты
         ufw_allow_port 443 tcp
@@ -1238,12 +1184,12 @@ seting_ufw() {
         fi
         
         # Включаем UFW
-        echo "y" | $USE_SUDO ufw enable >/dev/null 2>&1 || echo "y" | ufw enable >/dev/null 2>&1
+        echo "y" | ${USE_SUDO:+$USE_SUDO }ufw enable >/dev/null 2>&1
         purple "ufw настроен и включен."
     else
         if [[ "$(prompt_yes_no "UFW включен, но не настроен, хотите выключить?" "no")" == "yes" ]]; then
-            echo "y" | $USE_SUDO ufw disable >/dev/null 2>&1 || echo "y" | ufw disable >/dev/null 2>&1
-            echo "y" | $USE_SUDO ufw reset >/dev/null 2>&1 || echo "y" | ufw reset >/dev/null 2>&1
+            echo "y" | ${USE_SUDO:+$USE_SUDO }ufw disable >/dev/null 2>&1
+            echo "y" | ${USE_SUDO:+$USE_SUDO }ufw reset >/dev/null 2>&1
             purple "ufw отключен."
         else
             red "ВНИМАНИЕ, ufw не настроен, рекомендуется отключить его."
@@ -1260,17 +1206,14 @@ seting_ufw() {
 # Проверка наличия правила UFW
 ufw_rule_exists() {
     local rule=$1
-    $USE_SUDO ufw status 2>/dev/null | grep -qw "$rule" && return 0
-    ufw status 2>/dev/null | grep -qw "$rule" && return 0
+    ${USE_SUDO:+$USE_SUDO }ufw status 2>/dev/null | grep -qw "$rule" && return 0
     return 1
 }
 
 # Проверка и добавление портов, которые настраивает скрипт
 ensure_ufw_ports() {
     # Получаем текущий порт SSH
-    OLD_SSH_PORT=$(grep -i '^Port' /etc/ssh/sshd_config 2>/dev/null)
-    CURRENT_SSH_PORT=$(echo "$OLD_SSH_PORT" | awk -F' ' '{print $2}' | xargs)
-    [[ -z "$CURRENT_SSH_PORT" ]] && CURRENT_SSH_PORT=22
+    CURRENT_SSH_PORT=$(get_ssh_port)
     
     # 443/tcp
     if ! ufw_rule_exists "443/tcp"; then
@@ -1317,7 +1260,7 @@ ufw_menu() {
         return
     fi
     
-    UFW_STATUS=$($USE_SUDO ufw status 2>/dev/null || ufw status 2>/dev/null)
+    UFW_STATUS=$(${USE_SUDO:+$USE_SUDO }ufw status 2>/dev/null)
     if echo "$UFW_STATUS" | grep -q "Status: inactive"; then
         seting_ufw
         return
@@ -1344,7 +1287,7 @@ ufw_menu() {
         case $UFW_MENU in
             1)
                 service_short_status ufw
-                $USE_SUDO ufw status 2>/dev/null || ufw status
+                ${USE_SUDO:+$USE_SUDO }ufw status 2>/dev/null
                 ;;
             2)
                 while true; do
@@ -1379,7 +1322,7 @@ ufw_menu() {
                     red "Некорректный протокол. Используйте tcp или udp."
                     continue
                 fi
-                if echo "y" | $USE_SUDO ufw delete allow "$UFW_DEL_PORT/$UFW_DEL_PROTO" >/dev/null 2>&1 || echo "y" | ufw delete allow "$UFW_DEL_PORT/$UFW_DEL_PROTO" >/dev/null 2>&1; then
+                if echo "y" | ${USE_SUDO:+$USE_SUDO }ufw delete allow "$UFW_DEL_PORT/$UFW_DEL_PROTO" >/dev/null 2>&1; then
                     purple "Правило $UFW_DEL_PORT/$UFW_DEL_PROTO удалено."
                 else
                     red "Не удалось удалить правило $UFW_DEL_PORT/$UFW_DEL_PROTO."
@@ -1387,15 +1330,13 @@ ufw_menu() {
                 ;;
             5)
                 if [[ "$(prompt_yes_no "Отключить ufw?" "no")" == "yes" ]]; then
-                    echo "y" | $USE_SUDO ufw disable >/dev/null 2>&1 || echo "y" | ufw disable >/dev/null 2>&1
+                    echo "y" | ${USE_SUDO:+$USE_SUDO }ufw disable >/dev/null 2>&1
                     purple "ufw отключен."
                 fi
                 ;;
             6)
                 # Перед включением проверяем, что SSH порт разрешен
-                OLD_SSH_PORT=$(grep -i '^Port' /etc/ssh/sshd_config 2>/dev/null)
-                CURRENT_SSH_PORT=$(echo "$OLD_SSH_PORT" | awk -F' ' '{print $2}' | xargs)
-                [[ -z "$CURRENT_SSH_PORT" ]] && CURRENT_SSH_PORT=22
+                CURRENT_SSH_PORT=$(get_ssh_port)
                 if ! validate_port "$CURRENT_SSH_PORT" 1 65535; then
                     red "SSH порт из конфигурации некорректен: $CURRENT_SSH_PORT"
                     break
@@ -1410,7 +1351,7 @@ ufw_menu() {
                     fi
                 fi
                 if [[ "$(prompt_yes_no "Включить ufw?" "no")" == "yes" ]]; then
-                    echo "y" | $USE_SUDO ufw enable >/dev/null 2>&1 || echo "y" | ufw enable >/dev/null 2>&1
+                    echo "y" | ${USE_SUDO:+$USE_SUDO }ufw enable >/dev/null 2>&1
                     purple "ufw включен."
                 fi
                 ;;
@@ -1460,9 +1401,7 @@ install_fail2ban() {
     fi
     
     # Получаем текущий SSH порт для конфигурации
-    OLD_SSH_PORT=$(grep -i '^Port' /etc/ssh/sshd_config 2>/dev/null)
-    CURRENT_SSH_PORT=$(echo "$OLD_SSH_PORT" | awk -F' ' '{print $2}' | xargs)
-    [[ -z "$CURRENT_SSH_PORT" ]] && CURRENT_SSH_PORT=22
+    CURRENT_SSH_PORT=$(get_ssh_port)
     
     # Создаем конфигурацию fail2ban
     cat > /etc/fail2ban/jail.local <<EOF
@@ -1525,7 +1464,7 @@ select_fail2ban_jail() {
         return 1
     fi
     
-    fb_all=$($USE_SUDO fail2ban-client status 2>/dev/null || fail2ban-client status 2>/dev/null)
+    fb_all=$(${USE_SUDO:+$USE_SUDO }fail2ban-client status 2>/dev/null)
     if [[ -z "$fb_all" ]]; then
         red "Не удалось получить статус Fail2ban."
         return 1
@@ -1579,7 +1518,7 @@ fail2ban_menu() {
                 $USE_SUDO systemctl status fail2ban --no-pager 2>/dev/null || systemctl status fail2ban --no-pager 2>/dev/null
                 ;;
             2)
-                $USE_SUDO fail2ban-client status 2>/dev/null || fail2ban-client status 2>/dev/null
+                ${USE_SUDO:+$USE_SUDO }fail2ban-client status 2>/dev/null
                 ;;
             3)
                 if select_fail2ban_jail; then
@@ -1589,7 +1528,7 @@ fail2ban_menu() {
                     done
                     for j in $FB_JAILS; do
                         echo "------- Jail: $j -------"
-                        fb_status=$($USE_SUDO fail2ban-client status "$j" 2>/dev/null || fail2ban-client status "$j" 2>/dev/null)
+                        fb_status=$(${USE_SUDO:+$USE_SUDO }fail2ban-client status "$j" 2>/dev/null)
                         echo "$fb_status"
                     done
                 fi
@@ -1602,7 +1541,7 @@ fail2ban_menu() {
                     done
                     for j in $FB_JAILS; do
                         echo "------- Jail: $j -------"
-                        fb_out=$($USE_SUDO fail2ban-client status "$j" 2>/dev/null || fail2ban-client status "$j" 2>/dev/null)
+                        fb_out=$(${USE_SUDO:+$USE_SUDO }fail2ban-client status "$j" 2>/dev/null)
                         banned_list=$(echo "$fb_out" | grep -i "Banned IP list" | awk -F':' '{print $2}' | xargs)
                         if [[ -z "$banned_list" ]]; then
                             yellow "Забаненных IP в jail $j нет."
@@ -1620,7 +1559,7 @@ fail2ban_menu() {
                     done
                     for j in $FB_JAILS; do
                         echo "------- Jail: $j -------"
-                        fb_status=$($USE_SUDO fail2ban-client status "$j" 2>/dev/null || fail2ban-client status "$j" 2>/dev/null)
+                        fb_status=$(${USE_SUDO:+$USE_SUDO }fail2ban-client status "$j" 2>/dev/null)
                         echo "$fb_status"
                     done
                     read -p "Введите IP для разбана: " UNBAN_IP
@@ -1628,7 +1567,7 @@ fail2ban_menu() {
                         red "IP не указан."
                     else
                         for j in $FB_JAILS; do
-                            $USE_SUDO fail2ban-client set "$j" unbanip "$UNBAN_IP" 2>/dev/null || fail2ban-client set "$j" unbanip "$UNBAN_IP" 2>/dev/null
+                            ${USE_SUDO:+$USE_SUDO }fail2ban-client set "$j" unbanip "$UNBAN_IP" 2>/dev/null
                         done
                         purple "IP $UNBAN_IP разбанен во всех jail (если был в бане)."
                     fi
@@ -1962,11 +1901,9 @@ docker_menu() {
 
 # Проверка наличия пользователей в группе docker
 check_docker_users() {
-    local docker_users=($(getent group docker 2>/dev/null | cut -d: -f4 | tr ',' ' '))
-    if [[ ${#docker_users[@]} -eq 0 ]]; then
-        return 1
-    fi
-    return 0
+    local raw
+    raw=$(getent group docker 2>/dev/null | cut -d: -f4)
+    [[ -n "$raw" ]]
 }
 
 # Добавление пользователя в группу docker
@@ -2086,6 +2023,8 @@ install_docker() {
         fi
         if command -v wget &>/dev/null; then
             green "curl недоступен, используем wget для установки Docker..."
+            yellow "ВНИМАНИЕ: Следующая команда скачает и запустит скрипт с get.docker.com."
+            yellow "Убедитесь, что вы доверяете источнику, перед продолжением."
             wget -qO- https://get.docker.com | sh
             return
         fi
@@ -2093,6 +2032,8 @@ install_docker() {
 
     
     green "Устанавливаем Docker..."
+    yellow "ВНИМАНИЕ: Следующая команда скачает и запустит скрипт с get.docker.com."
+    yellow "Убедитесь, что вы доверяете источнику, перед продолжением."
     apt-get update
     curl -fsSL https://get.docker.com | sh
     
@@ -2232,6 +2173,8 @@ install_ollama() {
         fi
         
         green "Устанавливаем Ollama..."
+        yellow "ВНИМАНИЕ: Следующая команда скачает и запустит скрипт с ollama.com/install.sh."
+        yellow "Убедитесь, что вы доверяете источнику, перед продолжением."
         curl -fsSL https://ollama.com/install.sh | sh
         
         # Проверяем установку
@@ -2266,14 +2209,18 @@ install_ollama() {
 out_file() {
     echo "" | tee $INFO_FILE
     
-    OLD_SSH_PORT=$(grep -i '^Port' /etc/ssh/sshd_config 2>/dev/null)
-    CURRENT_SSH_PORT=$(echo "$OLD_SSH_PORT" | awk -F' ' '{print $2}' | xargs)
+    CURRENT_SSH_PORT=$(get_ssh_port)
     
     [[ -n "$ROOT_PASSWORD" ]] && echo "Пароль root = $ROOT_PASSWORD" | tee -a $INFO_FILE
     [[ -n "$CURRENT_SSH_PORT" ]] && echo "Порт SSH = $CURRENT_SSH_PORT" | tee -a $INFO_FILE
     [[ -n "$username" ]] && echo "Новый пользователь = $username" | tee -a $INFO_FILE
     [[ -n "$password" ]] && echo "Пароль нового пользователя = $password" | tee -a $INFO_FILE
     [[ -n "$NEW_AMNEZIA_PORT" ]] && echo "Порт для AmneziaWG = $NEW_AMNEZIA_PORT" | tee -a $INFO_FILE
+    if [[ -n "$ROOT_PASSWORD" || -n "$password" ]]; then
+        echo "" | tee -a $INFO_FILE
+        echo "ВНИМАНИЕ: Данный файл содержит пароли в открытом виде!" | tee -a $INFO_FILE
+        echo "Рекомендуется удалить файл $INFO_FILE после сохранения паролей в безопасном месте." | tee -a $INFO_FILE
+    fi
     echo "" | tee -a $INFO_FILE
     
     # Проверяем наличие 3X-UI

@@ -29,14 +29,14 @@
 Скачайте скрипт на сервер:
 
 ```bash
-curl -fsSL -o protection.sh https://raw.githubusercontent.com/svu2009-prog/Protection/main/protection.sh
-chmod +x protection.sh
+sudo curl -fsSL -o protection.sh https://raw.githubusercontent.com/svu2009-prog/Protection/main/protection.sh
+sudo chmod +x protection.sh
 ```
 
 Запустите:
 
 ```bash
-./protection.sh
+sudo ./protection.sh
 ```
 
 При запуске скрипт создаёт или обновляет глобальную команду:
@@ -89,9 +89,9 @@ protection --version
 Скачайте свежую версию `protection.sh` и запустите её:
 
 ```bash
-sudo curl -fsSL -o protection.sh https://raw.githubusercontent.com/svu2009-prog/Protection/main/protection.sh
-sudo chmod +x protection.sh
-sudo ./protection.sh
+curl -fsSL -o protection.sh https://raw.githubusercontent.com/svu2009-prog/Protection/main/protection.sh
+chmod +x protection.sh
+./protection.sh
 ```
 
 Если глобальная команда `/usr/local/bin/protection` старее скачанного скрипта, она будет заменена новой копией.

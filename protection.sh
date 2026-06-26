@@ -18,7 +18,7 @@ NEW_AMNEZIA_PORT=""
 output=""
 check_xui=""
 USE_SUDO=""
-PROTECTION_VERSION="1.0.2"
+PROTECTION_VERSION="1.1.0"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 DOCKER_MENU_VERSION=1
 DOCKER_HELP_VERSION=1
@@ -2153,55 +2153,6 @@ new_user() {
 # ============================================================
 # OLLAMA
 # ============================================================
-
-# Функция для установки Ollama и модели nomic-embed-text
-install_ollama() {
-    # Проверка наличия интернета
-    if ! check_internet; then
-        red "Нет подключения к интернету."
-        if [[ "$(prompt_yes_no "Продолжить без подключения?" "no")" == "no" ]]; then
-            return
-        fi
-    fi
-
-    # Проверяем, установлен ли Ollama
-    if command -v ollama &>/dev/null; then
-        green "Ollama уже установлен."
-    else
-        if [[ "$(prompt_yes_no "Хотите установить Ollama?" "no")" == "no" ]]; then
-            return
-        fi
-        
-        green "Устанавливаем Ollama..."
-        yellow "ВНИМАНИЕ: Следующая команда скачает и запустит скрипт с ollama.com/install.sh."
-        yellow "Убедитесь, что вы доверяете источнику, перед продолжением."
-        curl -fsSL https://ollama.com/install.sh | sh
-        
-        # Проверяем установку
-        if ollama --version &>/dev/null; then
-            purple "Ollama успешно установлен. Версия: $(ollama --version)"
-        else
-            red "Ошибка при установке Ollama."
-            return
-        fi
-    fi
-    
-    # Предложение установить модель
-    if [[ "$(prompt_yes_no "Хотите установить модель 'nomic-embed-text'?" "no")" == "yes" ]]; then
-        green "Устанавливаем модель nomic-embed-text..."
-        ollama pull nomic-embed-text
-        
-        # Проверяем установку модели
-        if ollama list | grep -q "nomic-embed-text"; then
-            purple "Модель nomic-embed-text успешно установлена."
-            green "Для запуска модели используйте команду: ollama run nomic-embed-text"
-        else
-            red "Ошибка при установке модели nomic-embed-text."
-        fi
-    fi
-}
-
-# ============================================================
 # ВЫВОД ИНФОРМАЦИИ В ФАЙЛ
 # ============================================================
 
@@ -2276,8 +2227,7 @@ show_help() {
     echo "10. Вход ROOT по SSH — включает/отключает root. Возможные проблемы: потеря доступа при отсутствии другого пользователя."
     yellow "Рекомендуется: иметь отдельного пользователя с sudo."
     echo "11. Docker — подменю управления: установка, обновление, чистка и контейнеры. Возможные проблемы: остановка сервисов, удаление данных контейнеров."
-    echo "12. Ollama — установка Ollama и моделей. Возможные проблемы: большой расход диска."
-    echo "13. Справка — показывает это описание."
+    echo "12. Справка — показывает это описание."
     echo " "
     if [[ "$DOCKER_MENU_VERSION" != "$DOCKER_HELP_VERSION" ]]; then
         yellow "ВНИМАНИЕ: справка Docker может не соответствовать меню."
@@ -2325,11 +2275,10 @@ main() {
             "9. Настроить, отключить\\включить Firewall UFW"
             "10. Отключить\\включить вход ROOT по SSH"
             "11. Docker"
-            "12. Установить Ollama и модели"
-            "13. Справка"
+            "12. Справка"
             "0. Выйти"
         )
-        local main_menu_values=(1 2 3 4 5 6 7 8 9 10 11 12 13 0)
+        local main_menu_values=(1 2 3 4 5 6 7 8 9 10 11 12 0)
         
         select_menu "Основное меню | protection v${PROTECTION_VERSION}" main_menu_labels main_menu_values
         NUMBER="$MENU_CHOICE"
@@ -2373,13 +2322,10 @@ main() {
                 docker_menu
                 ;;
             12)
-                install_ollama
-                ;;
-            13)
                 show_help
                 ;;
             *)
-                yellow "Введите число от 0 до 13 и нажмите ENTER"
+                yellow "Введите число от 0 до 12 и нажмите ENTER"
                 ;;
         esac
     done

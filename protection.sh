@@ -18,7 +18,7 @@ NEW_AMNEZIA_PORT=""
 output=""
 check_xui=""
 USE_SUDO=""
-PROTECTION_VERSION="1.1.0"
+PROTECTION_VERSION="1.1.1"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 DOCKER_MENU_VERSION=1
 DOCKER_HELP_VERSION=1
@@ -922,13 +922,13 @@ setup_ssh_keys() {
     if ! select_user_for_ssh_keys; then
         return
     fi
-    users="$SELECTED_USER"
+    username="$SELECTED_USER"
     
     # Проверка и создание директории .ssh
-    if [[ ! -d "/home/$users/.ssh" ]]; then
-        $USE_SUDO mkdir -p "/home/$users/.ssh"
-        $USE_SUDO chown "$users:$users" "/home/$users/.ssh"
-        $USE_SUDO chmod 700 "/home/$users/.ssh"
+    if [[ ! -d "/home/$username/.ssh" ]]; then
+        $USE_SUDO mkdir -p "/home/$username/.ssh"
+        $USE_SUDO chown "$username:$username" "/home/$username/.ssh"
+        $USE_SUDO chmod 700 "/home/$username/.ssh"
     fi
     
     recommended_password=$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 15)
@@ -949,14 +949,14 @@ setup_ssh_keys() {
     read -p "Если выполнили все действия до номера 5 включительно, нажмите ENTER: "
     
     # Открытие файла authorized_keys для редактирования
-    $USE_SUDO nano "/home/$users/.ssh/authorized_keys"
+    $USE_SUDO nano "/home/$username/.ssh/authorized_keys"
     
     # Установка прав доступа
-    $USE_SUDO chown -R "$users:$users" "/home/$users/.ssh"
-    $USE_SUDO chmod 600 "/home/$users/.ssh/authorized_keys"
+    $USE_SUDO chown -R "$username:$username" "/home/$username/.ssh"
+    $USE_SUDO chmod 600 "/home/$username/.ssh/authorized_keys"
     $USE_SUDO systemctl restart ssh 2>/dev/null || $USE_SUDO systemctl restart sshd 2>/dev/null
     
-    green "Настройка SSH-ключей для пользователя $users завершена."
+    green "Настройка SSH-ключей для пользователя $username завершена."
 }
 
 # ============================================================
@@ -1124,7 +1124,7 @@ change_port_ssh() {
 # ============================================================
 
 # Настройка UFW файрвола
-seting_ufw() {
+setup_ufw() {
     # Проверка наличия интернета
     if ! check_internet; then
         red "Нет подключения к интернету."
@@ -1256,13 +1256,13 @@ ensure_ufw_ports() {
 ufw_menu() {
     # Если ufw не установлен или не активен — выполняем стандартную установку/настройку
     if ! dpkg -l | grep -q "^ii  ufw"; then
-        seting_ufw
+            setup_ufw
         return
     fi
     
     UFW_STATUS=$(${USE_SUDO:+$USE_SUDO }ufw status 2>/dev/null)
     if echo "$UFW_STATUS" | grep -q "Status: inactive"; then
-        seting_ufw
+            setup_ufw
         return
     fi
     
@@ -1515,7 +1515,7 @@ fail2ban_menu() {
         case $FB_MENU in
             1)
                 service_short_status fail2ban
-                $USE_SUDO systemctl status fail2ban --no-pager 2>/dev/null || systemctl status fail2ban --no-pager 2>/dev/null
+                ${USE_SUDO:+$USE_SUDO }systemctl status fail2ban --no-pager 2>/dev/null
                 ;;
             2)
                 ${USE_SUDO:+$USE_SUDO }fail2ban-client status 2>/dev/null
@@ -1562,6 +1562,7 @@ fail2ban_menu() {
                         fb_status=$(${USE_SUDO:+$USE_SUDO }fail2ban-client status "$j" 2>/dev/null)
                         echo "$fb_status"
                     done
+                    local UNBAN_IP
                     read -p "Введите IP для разбана: " UNBAN_IP
                     if [[ -z "$UNBAN_IP" ]]; then
                         red "IP не указан."
@@ -1575,15 +1576,15 @@ fail2ban_menu() {
                 ;;
 
             6)
-                $USE_SUDO systemctl start fail2ban 2>/dev/null || systemctl start fail2ban 2>/dev/null
+                ${USE_SUDO:+$USE_SUDO }systemctl start fail2ban 2>/dev/null
                 purple "fail2ban запущен."
                 ;;
             7)
-                $USE_SUDO systemctl stop fail2ban 2>/dev/null || systemctl stop fail2ban 2>/dev/null
+                ${USE_SUDO:+$USE_SUDO }systemctl stop fail2ban 2>/dev/null
                 purple "fail2ban остановлен."
                 ;;
             8)
-                $USE_SUDO systemctl restart fail2ban 2>/dev/null || systemctl restart fail2ban 2>/dev/null
+                ${USE_SUDO:+$USE_SUDO }systemctl restart fail2ban 2>/dev/null
                 purple "fail2ban перезапущен."
                 ;;
             9)
@@ -1677,6 +1678,7 @@ docker_menu() {
                                     docker compose pull
                                 fi
                             else
+                                local COMPOSE_PATH
                                 read -p "Введите путь к файлу compose (или папке), или оставьте пустым для поиска: " COMPOSE_PATH
                                 if [[ -z "$COMPOSE_PATH" ]]; then
                                     echo "Ищем compose-файлы в /opt, /srv, /root, /home (это может занять время)..."
@@ -2150,8 +2152,6 @@ new_user() {
     done
 }
 
-# ============================================================
-# OLLAMA
 # ============================================================
 # ВЫВОД ИНФОРМАЦИИ В ФАЙЛ
 # ============================================================

@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "skills": {
+    "bash-53-features": {
+      "source": "jamie-bitflight/claude_skills",
+      "sourceType": "github",
+      "skillPath": "plugins/bash-development/skills/bash-53-features/SKILL.md",
+      "computedHash": "50c315ffffafd42ba6a1b2a96b8bf2b782548d6d32f7caca8080071c64e2ee59"
+    },
+    "bash-defensive-patterns": {
+      "source": "wshobson/agents",
+      "sourceType": "github",
+      "skillPath": "plugins/shell-scripting/skills/bash-defensive-patterns/SKILL.md",
+      "computedHash": "2443ceea5a3d83a805c5ac1686df924d778809ac752175f4d5179cae2f3a34d2"
+    },
+    "bash-linux": {
+      "source": "sickn33/antigravity-awesome-skills",
+      "sourceType": "github",
+      "skillPath": "skills/bash-linux/SKILL.md",
+      "computedHash": "e18a0aff172b4a8189b2d105021a63beff64678c7241944312cff3b1ca867c2d"
+    },
+    "bash-scripting": {
+      "source": "sickn33/antigravity-awesome-skills",
+      "sourceType": "github",
+      "skillPath": "skills/bash-scripting/SKILL.md",
+      "computedHash": "84d9922ee4689a39ecee13dc9193cf425893aea9137cf0979f8d29960e69ce18"
+    }
+  }
+}

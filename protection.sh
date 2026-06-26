@@ -18,7 +18,7 @@ NEW_AMNEZIA_PORT=""
 output=""
 check_xui=""
 USE_SUDO=""
-PROTECTION_VERSION="1.1.1"
+PROTECTION_VERSION="1.1.2"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 DOCKER_MENU_VERSION=1
 DOCKER_HELP_VERSION=1
@@ -926,12 +926,10 @@ setup_ssh_keys() {
     
     # Проверка и создание директории .ssh
     if [[ ! -d "/home/$username/.ssh" ]]; then
-        $USE_SUDO mkdir -p "/home/$username/.ssh"
-        $USE_SUDO chown "$username:$username" "/home/$username/.ssh"
-        $USE_SUDO chmod 700 "/home/$username/.ssh"
+        ${USE_SUDO:+$USE_SUDO }mkdir -p "/home/$username/.ssh"
+        ${USE_SUDO:+$USE_SUDO }chown "$username:$username" "/home/$username/.ssh"
+        ${USE_SUDO:+$USE_SUDO }chmod 700 "/home/$username/.ssh"
     fi
-    
-    recommended_password=$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 15)
     
     # Инструкции для пользователя
     red "Прежде чем продолжить, выполните следующие действия:"
@@ -940,7 +938,6 @@ setup_ssh_keys() {
     yellow "3. В PowerShell введите команду: cd путь_к_папке_ssh"
     yellow "4. Далее скопируйте и вставьте в PowerShell команду:"
     yellow "   - ssh-keygen -t ed25519 -C \"Комментарий\" -f Имя_файла -N Пароль"
-    green  "   - Рекомендуемый пароль $recommended_password"
     yellow "5. Введите команду: cat имя_файла.pub и скопируйте содержимое ключа."
     yellow "6. Вставьте это в открытом редакторе nano на сервере, сохраните и закройте редактор (Ctrl+X, Y, Enter)."
     echo
@@ -949,12 +946,12 @@ setup_ssh_keys() {
     read -p "Если выполнили все действия до номера 5 включительно, нажмите ENTER: "
     
     # Открытие файла authorized_keys для редактирования
-    $USE_SUDO nano "/home/$username/.ssh/authorized_keys"
+    ${USE_SUDO:+$USE_SUDO }nano "/home/$username/.ssh/authorized_keys"
     
     # Установка прав доступа
-    $USE_SUDO chown -R "$username:$username" "/home/$username/.ssh"
-    $USE_SUDO chmod 600 "/home/$username/.ssh/authorized_keys"
-    $USE_SUDO systemctl restart ssh 2>/dev/null || $USE_SUDO systemctl restart sshd 2>/dev/null
+    ${USE_SUDO:+$USE_SUDO }chown -R "$username:$username" "/home/$username/.ssh"
+    ${USE_SUDO:+$USE_SUDO }chmod 600 "/home/$username/.ssh/authorized_keys"
+    ${USE_SUDO:+$USE_SUDO }systemctl restart ssh 2>/dev/null || ${USE_SUDO:+$USE_SUDO }systemctl restart sshd 2>/dev/null
     
     green "Настройка SSH-ключей для пользователя $username завершена."
 }
@@ -1061,7 +1058,7 @@ disable_root_ssh() {
             else
                 echo "PermitRootLogin yes" | tee -a /etc/ssh/sshd_config >/dev/null
             fi
-            systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null
+            ${USE_SUDO:+$USE_SUDO }systemctl restart ssh 2>/dev/null || ${USE_SUDO:+$USE_SUDO }systemctl restart sshd 2>/dev/null
             purple "Вход root по SSH включен."
         fi
     else
@@ -1072,7 +1069,7 @@ disable_root_ssh() {
             else
                 echo "PermitRootLogin no" | tee -a /etc/ssh/sshd_config >/dev/null
             fi
-            systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null
+            ${USE_SUDO:+$USE_SUDO }systemctl restart ssh 2>/dev/null || ${USE_SUDO:+$USE_SUDO }systemctl restart sshd 2>/dev/null
             purple "Вход root по SSH отключен."
         fi
     fi
@@ -1106,9 +1103,9 @@ change_port_ssh() {
             fi
             
             # Перезапускаем SSH (для Ubuntu и Debian)
-            systemctl daemon-reload 2>/dev/null
-            systemctl restart ssh.socket 2>/dev/null
-            systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null
+            ${USE_SUDO:+$USE_SUDO }systemctl daemon-reload 2>/dev/null
+            ${USE_SUDO:+$USE_SUDO }systemctl restart ssh.socket 2>/dev/null
+            ${USE_SUDO:+$USE_SUDO }systemctl restart ssh 2>/dev/null || ${USE_SUDO:+$USE_SUDO }systemctl restart sshd 2>/dev/null
             
             purple "Порт SSH изменен на $NEW_SSH_PORT."
             CURRENT_SSH_PORT=$NEW_SSH_PORT
@@ -1589,9 +1586,9 @@ fail2ban_menu() {
                 ;;
             9)
                 if [[ -f /var/log/auth.log ]]; then
-                    $USE_SUDO grep -E "ssh|sshd|ssh2" /var/log/auth.log | tail -n 200
+                    ${USE_SUDO:+$USE_SUDO }grep -E "ssh|sshd|ssh2" /var/log/auth.log | tail -n 200
                 elif [[ -f /var/log/secure ]]; then
-                    $USE_SUDO grep -E "ssh|sshd|ssh2" /var/log/secure | tail -n 200
+                    ${USE_SUDO:+$USE_SUDO }grep -E "ssh|sshd|ssh2" /var/log/secure | tail -n 200
                 else
                     red "Не найден файл логов /var/log/auth.log или /var/log/secure."
                 fi
@@ -1693,6 +1690,7 @@ docker_menu() {
                                             compose_values+=("$((i+1))")
                                         done
                                         select_menu "Найденные compose-файлы:" compose_labels compose_values
+                                        local COMPOSE_NUM
                                         COMPOSE_NUM="$MENU_CHOICE"
                                         if [[ "$COMPOSE_NUM" =~ ^[0-9]+$ && "$COMPOSE_NUM" -ge 1 && "$COMPOSE_NUM" -le ${#compose_files[@]} ]]; then
                                             COMPOSE_PATH="${compose_files[$((COMPOSE_NUM-1))]}"
@@ -1874,11 +1872,11 @@ docker_menu() {
                 ;;
             14)
                 if [[ "$(prompt_yes_no "Полностью удалить Docker?" "no")" == "yes" ]]; then
-                    $USE_SUDO systemctl stop docker 2>/dev/null
-                    $USE_SUDO systemctl stop docker.socket 2>/dev/null
-                    $USE_SUDO apt-get purge -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker.io docker-compose >/dev/null 2>&1
-                    $USE_SUDO apt-get autoremove -y >/dev/null 2>&1
-                    $USE_SUDO rm -rf /var/lib/docker /var/lib/containerd
+                    ${USE_SUDO:+$USE_SUDO }systemctl stop docker 2>/dev/null
+                    ${USE_SUDO:+$USE_SUDO }systemctl stop docker.socket 2>/dev/null
+                    ${USE_SUDO:+$USE_SUDO }apt-get purge -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker.io docker-compose >/dev/null 2>&1
+                    ${USE_SUDO:+$USE_SUDO }apt-get autoremove -y >/dev/null 2>&1
+                    ${USE_SUDO:+$USE_SUDO }rm -rf /var/lib/docker /var/lib/containerd
                     if command -v docker &>/dev/null; then
                         yellow "Docker удален не полностью: найден бинарник $(command -v docker). Проверьте альтернативный способ установки."
                     else

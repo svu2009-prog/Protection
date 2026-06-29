@@ -14,11 +14,11 @@ PING_STATUS=""
 CURRENT_SSH_PORT=""
 username=""
 password=""
-NEW_AMNEZIA_PORT=""
+SSH_PORT_AMNEZIAWG=""
 output=""
 check_xui=""
 USE_SUDO=""
-PROTECTION_VERSION="1.1.3"
+PROTECTION_VERSION="1.1.4"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 DOCKER_MENU_VERSION=1
 DOCKER_HELP_VERSION=1
@@ -1168,18 +1168,6 @@ setup_ufw() {
             fi
         fi
         
-        # Предлагаем добавить порт для AmneziaWG
-        if [[ "$(prompt_yes_no "Хотите добавить порт для AmneziaWG?" "no")" == "yes" ]]; then
-            while true; do
-                read -p "Введите новый порт AmneziaWG (от 1024 до 65535): " NEW_AMNEZIA_PORT
-                if validate_ssh_port "$NEW_AMNEZIA_PORT"; then
-                    ufw_allow_port "$NEW_AMNEZIA_PORT" udp
-                    break
-                fi
-                red "Недопустимый порт. Порт должен быть в диапазоне от 1024 до 65535."
-            done
-        fi
-        
         # Включаем UFW
         echo "y" | ${USE_SUDO:+$USE_SUDO }ufw enable >/dev/null 2>&1
         purple "ufw настроен и включен."
@@ -1240,13 +1228,7 @@ ensure_ufw_ports() {
         fi
     fi
     
-    # Порт AmneziaWG (если задан)
-    if [[ -n "$NEW_AMNEZIA_PORT" ]] && validate_ssh_port "$NEW_AMNEZIA_PORT"; then
-        if ! ufw_rule_exists "$NEW_AMNEZIA_PORT/udp"; then
-            ufw_allow_port "$NEW_AMNEZIA_PORT" udp
-            purple "Добавлен порт $NEW_AMNEZIA_PORT/udp в UFW."
-        fi
-    fi
+
 }
 
 # Подменю управления UFW
@@ -1269,8 +1251,8 @@ ufw_menu() {
     while true; do
         local ufw_menu_labels=(
             "1. Показать статус"
-            "2. Добавить порт \"TCP\""
-            "3. Добавить порт \"UDP\""
+            "2. Добавить порты TCP"
+            "3. Добавить порты UDP"
             "4. Удалить порт"
             "5. Отключить ufw"
             "6. Включить ufw"
@@ -1288,24 +1270,30 @@ ufw_menu() {
                 ;;
             2)
                 while true; do
-                    read -p "Введите порт для добавления (TCP): " UFW_TCP_PORT
-                    if validate_port "$UFW_TCP_PORT" 1 65535; then
-                        ufw_allow_port "$UFW_TCP_PORT" tcp
-                        purple "Порт $UFW_TCP_PORT/tcp добавлен."
-                        break
-                    fi
-                    red "Недопустимый порт. Порт должен быть в диапазоне от 1 до 65535."
+                    read -p "Введите порты для добавления (TCP, через пробел): " UFW_TCP_PORTS
+                    for UFW_TCP_PORT in $UFW_TCP_PORTS; do
+                        if validate_port "$UFW_TCP_PORT" 1 65535; then
+                            ufw_allow_port "$UFW_TCP_PORT" tcp
+                            purple "Порт $UFW_TCP_PORT/tcp добавлен."
+                        else
+                            red "Недопустимый порт: $UFW_TCP_PORT. Пропускаем."
+                        fi
+                    done
+                    break
                 done
                 ;;
             3)
                 while true; do
-                    read -p "Введите порт для добавления (UDP): " UFW_UDP_PORT
-                    if validate_port "$UFW_UDP_PORT" 1 65535; then
-                        ufw_allow_port "$UFW_UDP_PORT" udp
-                        purple "Порт $UFW_UDP_PORT/udp добавлен."
-                        break
-                    fi
-                    red "Недопустимый порт. Порт должен быть в диапазоне от 1 до 65535."
+                    read -p "Введите порты для добавления (UDP, через пробел): " UFW_UDP_PORTS
+                    for UFW_UDP_PORT in $UFW_UDP_PORTS; do
+                        if validate_port "$UFW_UDP_PORT" 1 65535; then
+                            ufw_allow_port "$UFW_UDP_PORT" udp
+                            purple "Порт $UFW_UDP_PORT/udp добавлен."
+                        else
+                            red "Недопустимый порт: $UFW_UDP_PORT. Пропускаем."
+                        fi
+                    done
+                    break
                 done
                 ;;
             4)
@@ -2164,7 +2152,7 @@ out_file() {
     [[ -n "$CURRENT_SSH_PORT" ]] && echo "Порт SSH = $CURRENT_SSH_PORT" | tee -a $INFO_FILE
     [[ -n "$username" ]] && echo "Новый пользователь = $username" | tee -a $INFO_FILE
     [[ -n "$password" ]] && echo "Пароль нового пользователя = $password" | tee -a $INFO_FILE
-    [[ -n "$NEW_AMNEZIA_PORT" ]] && echo "Порт для AmneziaWG = $NEW_AMNEZIA_PORT" | tee -a $INFO_FILE
+
     if [[ -n "$ROOT_PASSWORD" || -n "$password" ]]; then
         echo "" | tee -a $INFO_FILE
         echo "ВНИМАНИЕ: Данный файл содержит пароли в открытом виде!" | tee -a $INFO_FILE

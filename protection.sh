@@ -18,7 +18,7 @@ SSH_PORT_AMNEZIAWG=""
 output=""
 check_xui=""
 USE_SUDO=""
-PROTECTION_VERSION="1.1.4"
+PROTECTION_VERSION="1.1.5"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 DOCKER_MENU_VERSION=1
 DOCKER_HELP_VERSION=1
@@ -1271,28 +1271,46 @@ ufw_menu() {
             2)
                 while true; do
                     read -p "Введите порты для добавления (TCP, через пробел): " UFW_TCP_PORTS
+                    if [[ -z "${UFW_TCP_PORTS// /}" ]]; then
+                        red "Ни один порт не введён."
+                        continue
+                    fi
+                    UFW_ADDED_COUNT=0
+                    UFW_ADDED_LIST=""
                     for UFW_TCP_PORT in $UFW_TCP_PORTS; do
                         if validate_port "$UFW_TCP_PORT" 1 65535; then
                             ufw_allow_port "$UFW_TCP_PORT" tcp
                             purple "Порт $UFW_TCP_PORT/tcp добавлен."
+                            UFW_ADDED_COUNT=$((UFW_ADDED_COUNT + 1))
+                            UFW_ADDED_LIST="$UFW_ADDED_LIST $UFW_TCP_PORT"
                         else
                             red "Недопустимый порт: $UFW_TCP_PORT. Пропускаем."
                         fi
                     done
+                    purple "Итого добавлено TCP-портов: $UFW_ADDED_COUNT:$UFW_ADDED_LIST"
                     break
                 done
                 ;;
             3)
                 while true; do
                     read -p "Введите порты для добавления (UDP, через пробел): " UFW_UDP_PORTS
+                    if [[ -z "${UFW_UDP_PORTS// /}" ]]; then
+                        red "Ни один порт не введён."
+                        continue
+                    fi
+                    UFW_ADDED_COUNT=0
+                    UFW_ADDED_LIST=""
                     for UFW_UDP_PORT in $UFW_UDP_PORTS; do
                         if validate_port "$UFW_UDP_PORT" 1 65535; then
                             ufw_allow_port "$UFW_UDP_PORT" udp
                             purple "Порт $UFW_UDP_PORT/udp добавлен."
+                            UFW_ADDED_COUNT=$((UFW_ADDED_COUNT + 1))
+                            UFW_ADDED_LIST="$UFW_ADDED_LIST $UFW_UDP_PORT"
                         else
                             red "Недопустимый порт: $UFW_UDP_PORT. Пропускаем."
                         fi
                     done
+                    purple "Итого добавлено UDP-портов: $UFW_ADDED_COUNT:$UFW_ADDED_LIST"
                     break
                 done
                 ;;

@@ -18,7 +18,7 @@ SSH_PORT_AMNEZIAWG=""
 output=""
 check_xui=""
 USE_SUDO=""
-PROTECTION_VERSION="1.1.5"
+PROTECTION_VERSION="1.1.6"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 DOCKER_MENU_VERSION=1
 DOCKER_HELP_VERSION=1
@@ -1253,7 +1253,7 @@ ufw_menu() {
             "1. Показать статус"
             "2. Добавить порты TCP"
             "3. Добавить порты UDP"
-            "4. Удалить порт"
+            "4. Удалить порт из списка"
             "5. Отключить ufw"
             "6. Включить ufw"
             "0. Назад"
@@ -1315,16 +1315,23 @@ ufw_menu() {
                 done
                 ;;
             4)
-                read -p "Введите порт для удаления: " UFW_DEL_PORT
-                if ! validate_port "$UFW_DEL_PORT" 1 65535; then
-                    red "Недопустимый порт. Порт должен быть в диапазоне от 1 до 65535."
+                UFW_RULES_RAW=$(${USE_SUDO:+$USE_SUDO }ufw status 2>/dev/null | grep -i " ALLOW " | awk '{print $1}')
+                if [[ -z "$UFW_RULES_RAW" ]]; then
+                    red "Нет правил для удаления."
                     continue
                 fi
-                read -p "Введите протокол (tcp/udp): " UFW_DEL_PROTO
-                if [[ "$UFW_DEL_PROTO" != "tcp" && "$UFW_DEL_PROTO" != "udp" ]]; then
-                    red "Некорректный протокол. Используйте tcp или udp."
+                UFW_DEL_LABELS=()
+                UFW_DEL_VALUES=()
+                for UFW_RULE in $UFW_RULES_RAW; do
+                    UFW_DEL_LABELS+=("$UFW_RULE")
+                    UFW_DEL_VALUES+=("$UFW_RULE")
+                done
+                select_menu "Выберите порт для удаления:" UFW_DEL_LABELS UFW_DEL_VALUES
+                if [[ "$MENU_CHOICE" == "0" ]]; then
                     continue
                 fi
+                UFW_DEL_PORT="${MENU_CHOICE%%/*}"
+                UFW_DEL_PROTO="${MENU_CHOICE##*/}"
                 if echo "y" | ${USE_SUDO:+$USE_SUDO }ufw delete allow "$UFW_DEL_PORT/$UFW_DEL_PROTO" >/dev/null 2>&1; then
                     purple "Правило $UFW_DEL_PORT/$UFW_DEL_PROTO удалено."
                 else

@@ -6,19 +6,15 @@
 # ============================================================
 
 # Переменные
-DOCKER_INSTALLED=false
 ROOT_PASSWORD=""
-DISABLE_PING=""
 ROOT_SSH_STATUS=""
 PING_STATUS=""
 CURRENT_SSH_PORT=""
 username=""
 password=""
-SSH_PORT_AMNEZIAWG=""
 output=""
-check_xui=""
 USE_SUDO=""
-PROTECTION_VERSION="1.1.7"
+PROTECTION_VERSION="1.1.8"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 DOCKER_MENU_VERSION=1
 DOCKER_HELP_VERSION=1
@@ -79,13 +75,22 @@ compare_versions() {
     local current=$1 installed=$2
     local current_major current_minor current_patch installed_major installed_minor installed_patch
 
-    if [[ ! "$installed" =~ ^[0-9]+(\.[0-9]+){2}$ ]]; then
+    # Валидируем формат обеих версий (MAJOR.MINOR.PATCH, только цифры)
+    if [[ ! "$current" =~ ^[0-9]+(\.[0-9]+){0,2}$ ]]; then
+        echo "older"
+        return 0
+    fi
+    if [[ ! "$installed" =~ ^[0-9]+(\.[0-9]+){0,2}$ ]]; then
         echo "older"
         return 0
     fi
 
     IFS=. read -r current_major current_minor current_patch <<< "$current"
     IFS=. read -r installed_major installed_minor installed_patch <<< "$installed"
+
+    # Пустые компоненты (напр. "1.2" без patch) приводим к 0
+    : "${current_patch:=0}"
+    : "${installed_patch:=0}"
 
     if (( installed_major == current_major && installed_minor == current_minor && installed_patch == current_patch )); then
         echo "same"
@@ -98,7 +103,7 @@ compare_versions() {
 
 get_script_version() {
     local script_file=$1
-    grep -m1 '^PROTECTION_VERSION=' "$script_file" 2>/dev/null | cut -d= -f2- | tr -d '"'
+    grep -m1 '^PROTECTION_VERSION=' "$script_file" 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d '\r'
 }
 
 ensure_global_command() {
@@ -375,11 +380,11 @@ check_internet() {
 port_in_use() {
     local port=$1
     if command -v ss &>/dev/null; then
-        ss -ltn 2>/dev/null | awk '{print $4}' | grep -q ":$port$"
+        ss -ltn 2>/dev/null | awk '{print $4}' | grep -qF ":$port\$"
         return $?
     fi
     if command -v netstat &>/dev/null; then
-        netstat -ltn 2>/dev/null | awk '{print $4}' | grep -q ":$port$"
+        netstat -ltn 2>/dev/null | awk '{print $4}' | grep -qF ":$port\$"
         return $?
     fi
     return 1
@@ -535,19 +540,19 @@ validate_password() {
     fi
     
     # Наличие строчных букв
-    if ! echo "$password" | grep -qP "[a-zа-я]"; then
+    if ! printf '%s\n' "$password" | grep -qP "[a-zа-я]"; then
         red "Пароль должен содержать хотя бы одну букву нижнего регистра."
         return 1
     fi
-    
+
     # Наличие заглавных букв
-    if ! echo "$password" | grep -qP "[A-ZА-Я]"; then
+    if ! printf '%s\n' "$password" | grep -qP "[A-ZА-Я]"; then
         red "Пароль должен содержать хотя бы одну букву верхнего регистра."
         return 1
     fi
-    
+
     # Наличие цифр
-    if ! echo "$password" | grep -qP "[0-9]"; then
+    if ! printf '%s\n' "$password" | grep -qP "[0-9]"; then
         red "Пароль должен содержать хотя бы одну цифру."
         return 1
     fi
@@ -603,7 +608,7 @@ change_user_password() {
             echo
             
             if [[ "$password" == "$password_confirm" ]]; then
-                if echo "$username:$password" | chpasswd; then
+                if printf '%s\n' "$username:$password" | chpasswd; then
                     green "Пароль для пользователя $username успешно изменен."
                     break
                 else
@@ -619,6 +624,7 @@ change_user_password() {
 
 # Изменение пароля root
 change_root_pass() {
+    local ROOT_PASSWORD_CONFIRM=""
     if [[ "$(prompt_yes_no "Хотите изменить пароль root?" "no")" == "no" ]]; then
         return
     fi
@@ -632,7 +638,7 @@ change_root_pass() {
             echo
             
             if [[ "$ROOT_PASSWORD" == "$ROOT_PASSWORD_CONFIRM" ]]; then
-                if echo "root:$ROOT_PASSWORD" | chpasswd; then
+                if printf '%s\n' "root:$ROOT_PASSWORD" | chpasswd; then
                     green "Пароль root успешно изменен."
                     break
                 else
@@ -691,9 +697,9 @@ disable_ipv6() {
         
         if [[ "$(prompt_yes_no "Хотите включить IPv6?" "no")" == "yes" ]]; then
             cp /etc/sysctl.conf /etc/sysctl.conf.bak || { red "Не удалось создать резервную копию sysctl.conf."; return 1; }
-            sed -i '/net.ipv6.conf.all.disable_ipv6/d' /etc/sysctl.conf
-            sed -i '/net.ipv6.conf.default.disable_ipv6/d' /etc/sysctl.conf
-            sed -i '/net.ipv6.conf.lo.disable_ipv6/d' /etc/sysctl.conf
+            sed -i '/^[[:space:]]*net.ipv6.conf.all.disable_ipv6/d' /etc/sysctl.conf
+            sed -i '/^[[:space:]]*net.ipv6.conf.default.disable_ipv6/d' /etc/sysctl.conf
+            sed -i '/^[[:space:]]*net.ipv6.conf.lo.disable_ipv6/d' /etc/sysctl.conf
             sysctl -p >/dev/null 2>&1
             purple "IPv6 успешно включен."
         fi
@@ -740,7 +746,8 @@ get_non_system_users() {
 
 # Выбор пользователя из списка
 select_non_system_user() {
-    local users_list=($(get_non_system_users))
+    local users_list=()
+    mapfile -t users_list < <(get_non_system_users)
     local user_labels=()
     local user_values=()
     
@@ -770,9 +777,11 @@ select_non_system_user() {
 
 # Выбор пользователя для SSH-ключей
 select_user_for_ssh_keys() {
-    local users_list=($(get_non_system_users))
+    local users_list=()
+    mapfile -t users_list < <(get_non_system_users)
     local user_labels=()
     local user_values=()
+    local manual_user=""
     
     if [[ ${#users_list[@]} -eq 0 ]]; then
         red "Нет подходящих пользователей."
@@ -814,7 +823,8 @@ select_user_for_ssh_keys() {
 
 # Подменю управления пользователями
 users_menu() {
-    local users_list=($(get_non_system_users))
+    local users_list=()
+    mapfile -t users_list < <(get_non_system_users)
     
     # Если пользователей нет — выполняем стандартное создание
     if [[ ${#users_list[@]} -eq 0 ]]; then
@@ -841,7 +851,7 @@ users_menu() {
         
         case $USER_MENU in
             1)
-                users_list=($(get_non_system_users))
+                mapfile -t users_list < <(get_non_system_users)
                 if [[ ${#users_list[@]} -eq 0 ]]; then
                     yellow "Пользователей нет."
                 else
@@ -1020,7 +1030,7 @@ create_user() {
     fi
     
     # Устанавливаем пароль
-    if ! echo "$username:$password" | chpasswd; then
+    if ! printf '%s\n' "$username:$password" | chpasswd; then
         red "Ошибка при установке пароля для пользователя $username."
         userdel -r "$username"
         return 1
@@ -1252,7 +1262,7 @@ setup_ufw() {
 # Проверка наличия правила UFW
 ufw_rule_exists() {
     local rule=$1
-    ${USE_SUDO:+$USE_SUDO }ufw status 2>/dev/null | grep -qw "$rule" && return 0
+    ${USE_SUDO:+$USE_SUDO }ufw status 2>/dev/null | grep -qwF "$rule" && return 0
     return 1
 }
 
@@ -1388,9 +1398,6 @@ ufw_menu() {
                     UFW_DEL_VALUES+=("$UFW_RULE")
                 done
                 select_menu "Выберите порт для удаления:" UFW_DEL_LABELS UFW_DEL_VALUES
-                if [[ "$MENU_CHOICE" == "0" ]]; then
-                    continue
-                fi
                 UFW_DEL_PORT="${MENU_CHOICE%%/*}"
                 UFW_DEL_PROTO="${MENU_CHOICE##*/}"
                 if echo "y" | ${USE_SUDO:+$USE_SUDO }ufw delete allow "$UFW_DEL_PORT/$UFW_DEL_PROTO" >/dev/null 2>&1; then
@@ -1477,6 +1484,11 @@ install_fail2ban() {
     # Получаем текущий SSH порт для конфигурации
     CURRENT_SSH_PORT=$(get_ssh_port)
     
+    # Резервная копия существующего jail.local (если есть)
+    if [[ -f /etc/fail2ban/jail.local ]]; then
+        cp /etc/fail2ban/jail.local /etc/fail2ban/jail.local.bak || { red "Не удалось создать резервную копию jail.local."; return 1; }
+    fi
+
     # Создаем конфигурацию fail2ban
     cat > /etc/fail2ban/jail.local <<EOF
 [DEFAULT]
@@ -1855,7 +1867,7 @@ docker_menu() {
                 ;;
             7)
                 if command -v docker &>/dev/null; then
-                    containers_list=($(docker ps -a --format "{{.Names}}"))
+                    mapfile -t containers_list < <(docker ps -a --format "{{.Names}}")
                     if [[ ${#containers_list[@]} -eq 0 ]]; then
                         red "Контейнеры не найдены."
                     else
@@ -2013,7 +2025,8 @@ add_user_to_docker() {
 # Выбор существующего пользователя для добавления в группу docker
 select_existing_user() {
     # Получаем список несистемных пользователей (UID >= 1000), исключая ubuntu
-    local users_list=($(getent passwd | awk -F: '$3 >= 1000 && $3 < 65534 && $1 != "ubuntu" {print $1}' | grep -vE '(nologin|false|sync|halt|shutdown)'))
+    local users_list=()
+    mapfile -t users_list < <(getent passwd | awk -F: '$3 >= 1000 && $3 < 65534 && $1 != "ubuntu" {print $1}' | grep -vE '(nologin|false|sync|halt|shutdown)')
     local user_labels=()
     local user_values=()
     
@@ -2063,7 +2076,6 @@ install_docker() {
     fi
 
     if command -v docker &>/dev/null; then
-        DOCKER_INSTALLED=true
         green "Docker уже установлен."
         
         # Проверяем наличие пользователей в группе docker
@@ -2116,9 +2128,7 @@ install_docker() {
     yellow "Убедитесь, что вы доверяете источнику, перед продолжением."
     apt-get update
     curl -fsSL https://get.docker.com | sh
-    
-    DOCKER_INSTALLED=true
-    
+
     # Проверяем установку
     if docker --version &>/dev/null; then
         purple "Docker успешно установлен. Версия: $(docker --version | awk '{print $3}' | tr -d ',')"
@@ -2144,6 +2154,7 @@ install_docker() {
 # Функция создания нового пользователя с интерактивным выбором параметров
 new_user() {
     local target_groups=""
+    local recommended_password=""
     
     # Определяем группы в зависимости от наличия sudo
     if [[ -n "$USE_SUDO" ]]; then
@@ -2161,7 +2172,7 @@ new_user() {
         
         # Выбор имени пользователя
         while true; do
-            recommended_username=$(head /dev/urandom | tr -dc a-z | head -c 1; head /dev/urandom | tr -dc a-z0-9 | head -c 7)
+            recommended_username=$(head -c 64 /dev/urandom | tr -dc a-z | head -c 1; head -c 64 /dev/urandom | tr -dc a-z0-9 | head -c 7)
             
             if [[ "$(prompt_yes_no "Рекомендуемое имя пользователя $recommended_username, оставить?" "yes")" == "yes" ]]; then
                 username=$recommended_username
@@ -2181,7 +2192,7 @@ new_user() {
             fi
             
             if [[ -n "$USE_SUDO" ]]; then
-                if grep -q "$username ALL=(ALL) NOPASSWD:ALL" /etc/sudoers.d/* 2>/dev/null; then
+                if grep -qF "$username ALL=(ALL) NOPASSWD:ALL" /etc/sudoers.d/* 2>/dev/null; then
                     if [[ "$(prompt_yes_no "Хотите исключить пользователя $username из группы для выполнения команд без пароля?" "no")" == "yes" ]]; then
                         remove_user_nopasswd "$username"
                     fi
@@ -2197,7 +2208,7 @@ new_user() {
         else
             # Создание нового пользователя
             while true; do
-                recommended_password=$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 15)
+                recommended_password=$(head -c 64 /dev/urandom | tr -dc A-Za-z0-9 | head -c 15)
                 
                 if [[ "$(prompt_yes_no "Рекомендуемый пароль пользователя $recommended_password, оставить?" "yes")" == "yes" ]]; then
                     password=$recommended_password
@@ -2236,25 +2247,25 @@ new_user() {
 
 # Функция для сохранения всех настроек в файл
 out_file() {
-    echo "" | tee $INFO_FILE
+    echo "" | tee "$INFO_FILE"
     
     CURRENT_SSH_PORT=$(get_ssh_port)
     
-    [[ -n "$ROOT_PASSWORD" ]] && echo "Пароль root = $ROOT_PASSWORD" | tee -a $INFO_FILE
-    [[ -n "$CURRENT_SSH_PORT" ]] && echo "Порт SSH = $CURRENT_SSH_PORT" | tee -a $INFO_FILE
-    [[ -n "$username" ]] && echo "Новый пользователь = $username" | tee -a $INFO_FILE
-    [[ -n "$password" ]] && echo "Пароль нового пользователя = $password" | tee -a $INFO_FILE
+    [[ -n "$ROOT_PASSWORD" ]] && echo "Пароль root = $ROOT_PASSWORD" | tee -a "$INFO_FILE"
+    [[ -n "$CURRENT_SSH_PORT" ]] && echo "Порт SSH = $CURRENT_SSH_PORT" | tee -a "$INFO_FILE"
+    [[ -n "$username" ]] && echo "Новый пользователь = $username" | tee -a "$INFO_FILE"
+    [[ -n "$password" ]] && echo "Пароль нового пользователя = $password" | tee -a "$INFO_FILE"
 
     if [[ -n "$ROOT_PASSWORD" || -n "$password" ]]; then
-        echo "" | tee -a $INFO_FILE
-        echo "ВНИМАНИЕ: Данный файл содержит пароли в открытом виде!" | tee -a $INFO_FILE
-        echo "Рекомендуется удалить файл $INFO_FILE после сохранения паролей в безопасном месте." | tee -a $INFO_FILE
+        echo "" | tee -a "$INFO_FILE"
+        echo "ВНИМАНИЕ: Данный файл содержит пароли в открытом виде!" | tee -a "$INFO_FILE"
+        echo "Рекомендуется удалить файл $INFO_FILE после сохранения паролей в безопасном месте." | tee -a "$INFO_FILE"
     fi
-    echo "" | tee -a $INFO_FILE
+    echo "" | tee -a "$INFO_FILE"
     
     # Проверяем наличие 3X-UI
     if command -v x-ui &>/dev/null || [[ -f /usr/local/x-ui/x-ui.service ]] || systemctl list-unit-files 2>/dev/null | grep -q '^x-ui'; then
-        echo "------- Настройки для панели 3X-UI --------" | tee -a $INFO_FILE
+        echo "------- Настройки для панели 3X-UI --------" | tee -a "$INFO_FILE"
         if command -v x-ui &>/dev/null; then
             output=$(x-ui settings 2>/dev/null | strip_ansi)
             PORT_X_UI=$(echo "$output" | grep -i "port:" | awk -F' ' '{print $2}' | xargs)
@@ -2263,20 +2274,15 @@ out_file() {
             WEB_X_UI=$(echo "$output" | grep -i "webBasePath:" | awk -F' ' '{print $2}' | xargs)
             ACC_X_UI=$(echo "$output" | grep -i "Access URL:" | awk -F' ' '{print $3}' | xargs)
             
-            echo "username: $USER_X_UI" | tee -a $INFO_FILE
-            echo "password: $PASS_X_UI" | tee -a $INFO_FILE
-            echo "port: $PORT_X_UI" | tee -a $INFO_FILE
-            echo "webBasePath: $WEB_X_UI" | tee -a $INFO_FILE
-            echo "Access URL: $ACC_X_UI" | tee -a $INFO_FILE
+            echo "username: $USER_X_UI" | tee -a "$INFO_FILE"
+            echo "password: $PASS_X_UI" | tee -a "$INFO_FILE"
+            echo "port: $PORT_X_UI" | tee -a "$INFO_FILE"
+            echo "webBasePath: $WEB_X_UI" | tee -a "$INFO_FILE"
+            echo "Access URL: $ACC_X_UI" | tee -a "$INFO_FILE"
         else
-            echo "x-ui команда не найдена, пропускаем чтение настроек." | tee -a $INFO_FILE
+            echo "x-ui команда не найдена, пропускаем чтение настроек." | tee -a "$INFO_FILE"
         fi
-        
-        if [[ "$check_xui" == "yes" ]]; then
-            echo "------- Сертификаты --------" | tee -a $INFO_FILE
-            echo "Путь к файлу ПУБЛИЧНОГО ключа сертификата - /etc/ssl/self_signed_cert/self_signed.crt" | tee -a $INFO_FILE
-            echo "Путь к файлу ПРИВАТНОГО ключа сертификата - /etc/ssl/self_signed_cert/self_signed.key" | tee -a $INFO_FILE
-        fi
+
     fi
 }
 

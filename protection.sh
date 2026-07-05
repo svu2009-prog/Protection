@@ -18,7 +18,7 @@ SSH_PORT_AMNEZIAWG=""
 output=""
 check_xui=""
 USE_SUDO=""
-PROTECTION_VERSION="1.1.6"
+PROTECTION_VERSION="1.1.7"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 DOCKER_MENU_VERSION=1
 DOCKER_HELP_VERSION=1
@@ -132,17 +132,17 @@ ensure_global_command() {
 
     command_dir="$(dirname "$PROTECTION_COMMAND_PATH")"
 
-    if ! ${USE_SUDO} mkdir -p "$command_dir"; then
+    if ! ${USE_SUDO:+$USE_SUDO }mkdir -p "$command_dir"; then
         red "Не удалось создать каталог $command_dir для команды protection."
         return 1
     fi
 
-    if ! ${USE_SUDO} cp --remove-destination "$script_path" "$PROTECTION_COMMAND_PATH"; then
+    if ! ${USE_SUDO:+$USE_SUDO }cp --remove-destination "$script_path" "$PROTECTION_COMMAND_PATH"; then
         red "Не удалось создать глобальную команду $PROTECTION_COMMAND_PATH."
         return 1
     fi
 
-    if ! ${USE_SUDO} chmod +x "$PROTECTION_COMMAND_PATH"; then
+    if ! ${USE_SUDO:+$USE_SUDO }chmod +x "$PROTECTION_COMMAND_PATH"; then
         red "Не удалось сделать $PROTECTION_COMMAND_PATH исполняемым."
         return 1
     fi
@@ -690,7 +690,7 @@ disable_ipv6() {
         green "IPv6 уже отключен во всех интерфейсах."
         
         if [[ "$(prompt_yes_no "Хотите включить IPv6?" "no")" == "yes" ]]; then
-            cp /etc/sysctl.conf /etc/sysctl.conf.bak
+            cp /etc/sysctl.conf /etc/sysctl.conf.bak || { red "Не удалось создать резервную копию sysctl.conf."; return 1; }
             sed -i '/net.ipv6.conf.all.disable_ipv6/d' /etc/sysctl.conf
             sed -i '/net.ipv6.conf.default.disable_ipv6/d' /etc/sysctl.conf
             sed -i '/net.ipv6.conf.lo.disable_ipv6/d' /etc/sysctl.conf
@@ -706,6 +706,7 @@ disable_ipv6() {
     fi
     
     # Добавляем параметры отключения IPv6 в sysctl.conf
+    cp /etc/sysctl.conf /etc/sysctl.conf.bak || { red "Не удалось создать резервную копию sysctl.conf."; return 1; }
     tee -a /etc/sysctl.conf > /dev/null <<EOF
 net.ipv6.conf.all.disable_ipv6 = 1
 net.ipv6.conf.default.disable_ipv6 = 1
@@ -918,6 +919,42 @@ users_menu() {
 # НАСТРОЙКА SSH-КЛЮЧЕЙ
 # ============================================================
 
+# Валидация sshd_config и безопасный рестарт sshd с авто-восстановлением из .bak.
+# Возвращает 0 при успехе, 1 при провале (конфиг восстановлен, если был бэкап).
+validate_and_restart_sshd() {
+    local sshd_config="/etc/ssh/sshd_config"
+    local sshd_bak="${sshd_config}.bak"
+
+    # Предварительная проверка синтаксиса sshd_config
+    if ! ${USE_SUDO:+$USE_SUDO }sshd -t 2>/dev/null; then
+        red "Ошибка: sshd_config невалиден (sshd -t завершился с ошибкой)."
+        if [[ -f "$sshd_bak" ]]; then
+            ${USE_SUDO:+$USE_SUDO }cp "$sshd_bak" "$sshd_config"
+            yellow "sshd_config восстановлен из резервной копии $sshd_bak."
+            # Повторная проверка восстановленного конфига
+            if ! ${USE_SUDO:+$USE_SUDO }sshd -t 2>/dev/null; then
+                red "Внимание: восстановленный sshd_config тоже невалиден — проверьте вручную!"
+                return 1
+            fi
+        else
+            red "Резервная копия $sshd_bak не найдена — невозможно восстановить."
+            return 1
+        fi
+    fi
+
+    # Перезапуск sshd: сначала ssh (Ubuntu/Debian), затем sshd (fallback)
+    if ${USE_SUDO:+$USE_SUDO }systemctl restart ssh 2>/dev/null; then
+        return 0
+    fi
+    if ${USE_SUDO:+$USE_SUDO }systemctl restart sshd 2>/dev/null; then
+        return 0
+    fi
+
+    red "Ошибка: не удалось перезапустить службу sshd (ssh/ssh)."
+    red "Внимание: текущая SSH-сессия может быть затронута. Проверьте статус службы вручную."
+    return 1
+}
+
 setup_ssh_keys() {
     if ! select_user_for_ssh_keys; then
         return
@@ -951,7 +988,7 @@ setup_ssh_keys() {
     # Установка прав доступа
     ${USE_SUDO:+$USE_SUDO }chown -R "$username:$username" "/home/$username/.ssh"
     ${USE_SUDO:+$USE_SUDO }chmod 600 "/home/$username/.ssh/authorized_keys"
-    ${USE_SUDO:+$USE_SUDO }systemctl restart ssh 2>/dev/null || ${USE_SUDO:+$USE_SUDO }systemctl restart sshd 2>/dev/null
+    validate_and_restart_sshd
     
     green "Настройка SSH-ключей для пользователя $username завершена."
 }
@@ -996,7 +1033,7 @@ create_user() {
     
     yellow "Проверяем какие права имеет пользователь $username"
     if [[ -n "$USE_SUDO" ]]; then
-        $USE_SUDO -l -U "$username" 2>/dev/null
+        ${USE_SUDO:+$USE_SUDO }sudo -l -U "$username" 2>/dev/null
         green "Если вы видите такую надпись (ALL : ALL) ALL то все нормально"
     fi
     
@@ -1014,24 +1051,34 @@ disable_ping() {
         
         if [[ "$PING_STATUS" == "net.ipv4.icmp_echo_ignore_all = 0" ]]; then
             if [[ "$(prompt_yes_no "Доступ к команде ping включен. Хотите отключить доступ к команде ping?" "no")" == "yes" ]]; then
-                cp /etc/sysctl.conf /etc/sysctl.conf.bak
+                cp /etc/sysctl.conf /etc/sysctl.conf.bak || { red "Не удалось создать резервную копию sysctl.conf."; return 1; }
                 sed -i 's/net.ipv4.icmp_echo_ignore_all .*/net.ipv4.icmp_echo_ignore_all = 1/' /etc/sysctl.conf
-                sysctl -p >/dev/null 2>&1
-                purple "Доступ к команде ping отключен."
+                if sysctl -p >/dev/null 2>&1; then
+                    purple "Доступ к команде ping отключен."
+                else
+                    red "Ошибка применения sysctl. Резервная копия: sysctl.conf.bak."
+                fi
             fi
         else
             if [[ "$(prompt_yes_no "Хотите включить доступ к команде ping?" "no")" == "yes" ]]; then
-                cp /etc/sysctl.conf /etc/sysctl.conf.bak
+                cp /etc/sysctl.conf /etc/sysctl.conf.bak || { red "Не удалось создать резервную копию sysctl.conf."; return 1; }
                 sed -i 's/net.ipv4.icmp_echo_ignore_all .*/net.ipv4.icmp_echo_ignore_all = 0/' /etc/sysctl.conf
-                sysctl -p >/dev/null 2>&1
-                purple "Доступ к команде ping включен."
+                if sysctl -p >/dev/null 2>&1; then
+                    purple "Доступ к команде ping включен."
+                else
+                    red "Ошибка применения sysctl. Резервная копия: sysctl.conf.bak."
+                fi
             fi
         fi
     else
         if [[ "$(prompt_yes_no "Хотите отключить доступ к команде ping?" "no")" == "yes" ]]; then
+            cp /etc/sysctl.conf /etc/sysctl.conf.bak || { red "Не удалось создать резервную копию sysctl.conf."; return 1; }
             echo 'net.ipv4.icmp_echo_ignore_all = 1' | tee -a /etc/sysctl.conf >/dev/null
-            sysctl -p >/dev/null 2>&1
-            yellow "Доступ к команде ping отключен."
+            if sysctl -p >/dev/null 2>&1; then
+                purple "Доступ к команде ping отключен."
+            else
+                red "Ошибка применения sysctl. Проверьте /etc/sysctl.conf (резервная копия: sysctl.conf.bak)."
+            fi
         fi
     fi
 }
@@ -1052,24 +1099,24 @@ disable_root_ssh() {
     
     if [[ "$ROOT_SSH_STATUS" == "no" ]]; then
         if [[ "$(prompt_yes_no "Вход root по SSH отключен. Хотите включить вход root по SSH?" "no")" == "yes" ]]; then
-            cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak
+            cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak || { red "Не удалось создать резервную копию sshd_config."; return 1; }
             if grep -qi '^\s*PermitRootLogin' /etc/ssh/sshd_config; then
                 sed -i 's/^\s*PermitRootLogin.*/PermitRootLogin yes/I' /etc/ssh/sshd_config
             else
                 echo "PermitRootLogin yes" | tee -a /etc/ssh/sshd_config >/dev/null
             fi
-            ${USE_SUDO:+$USE_SUDO }systemctl restart ssh 2>/dev/null || ${USE_SUDO:+$USE_SUDO }systemctl restart sshd 2>/dev/null
+            validate_and_restart_sshd
             purple "Вход root по SSH включен."
         fi
     else
         if [[ "$(prompt_yes_no "Хотите отключить вход root по SSH?" "no")" == "yes" ]]; then
-            cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak
+            cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak || { red "Не удалось создать резервную копию sshd_config."; return 1; }
             if grep -qi '^\s*PermitRootLogin' /etc/ssh/sshd_config; then
                 sed -i 's/^\s*PermitRootLogin.*/PermitRootLogin no/I' /etc/ssh/sshd_config
             else
                 echo "PermitRootLogin no" | tee -a /etc/ssh/sshd_config >/dev/null
             fi
-            ${USE_SUDO:+$USE_SUDO }systemctl restart ssh 2>/dev/null || ${USE_SUDO:+$USE_SUDO }systemctl restart sshd 2>/dev/null
+            validate_and_restart_sshd
             purple "Вход root по SSH отключен."
         fi
     fi
@@ -1083,9 +1130,7 @@ change_port_ssh() {
     if [[ "$(prompt_yes_no "Порт SSH = $CURRENT_SSH_PORT, хотите изменить его?" "no")" == "no" ]]; then
         return
     fi
-    
-    disable_ufw_if_active
-    
+
     while true; do
         read -p 'Введите новый порт SSH (от 1024 до 65535): ' NEW_SSH_PORT
         
@@ -1095,18 +1140,27 @@ change_port_ssh() {
                 continue
             fi
             # Изменяем порт в конфигурации SSH
-            cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak
-            if grep -q "^Port " /etc/ssh/sshd_config; then
-                sed -i "s/^Port .*/Port ${NEW_SSH_PORT}/" /etc/ssh/sshd_config
+            cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak || { red "Не удалось создать резервную копию sshd_config."; return 1; }
+            # Матчит Port с любым отступом (включая табы), чтобы избежать дублирования директивы
+            if grep -qE '^[[:space:]]*Port[[:space:]]' /etc/ssh/sshd_config; then
+                sed -i -E 's/^[[:space:]]*Port[[:space:]].*/Port '"$NEW_SSH_PORT"'/' /etc/ssh/sshd_config
             else
                 echo "Port $NEW_SSH_PORT" | tee -a /etc/ssh/sshd_config >/dev/null
             fi
-            
-            # Перезапускаем SSH (для Ubuntu и Debian)
+
+            # Открываем новый порт в UFW до рестарта sshd (если UFW активен)
+            if ${USE_SUDO:+$USE_SUDO }ufw status 2>/dev/null | grep -q 'Status: active'; then
+                ufw_allow_port "$NEW_SSH_PORT" tcp
+            fi
+
+            # Перезапускаем SSH (для Ubuntu и Debian) с валидацией и авто-restore
             ${USE_SUDO:+$USE_SUDO }systemctl daemon-reload 2>/dev/null
             ${USE_SUDO:+$USE_SUDO }systemctl restart ssh.socket 2>/dev/null
-            ${USE_SUDO:+$USE_SUDO }systemctl restart ssh 2>/dev/null || ${USE_SUDO:+$USE_SUDO }systemctl restart sshd 2>/dev/null
-            
+            if ! validate_and_restart_sshd; then
+                red "Не удалось применить новый порт SSH. Проверьте конфигурацию вручную."
+                return 1
+            fi
+
             purple "Порт SSH изменен на $NEW_SSH_PORT."
             CURRENT_SSH_PORT=$NEW_SSH_PORT
             break
@@ -1144,11 +1198,14 @@ setup_ufw() {
         fi
         
         disable_ufw_if_active
-        echo "y" | ${USE_SUDO:+$USE_SUDO }ufw reset >/dev/null 2>&1
-        
+        if ! echo "y" | ${USE_SUDO:+$USE_SUDO }ufw reset >/dev/null 2>&1; then
+            red "Ошибка при сбросе правил ufw (ufw reset)."
+            return 1
+        fi
+
         # Получаем текущий порт SSH
         CURRENT_SSH_PORT=$(get_ssh_port)
-        
+
         # Разрешаем стандартные порты
         ufw_allow_port 443 tcp
         if validate_port "$CURRENT_SSH_PORT" 1 65535; then
@@ -1156,7 +1213,7 @@ setup_ufw() {
         else
             red "SSH порт из конфигурации некорректен: $CURRENT_SSH_PORT"
         fi
-        
+
         # Проверяем наличие 3X-UI и добавляем его порт
         if command -v x-ui &>/dev/null; then
             output=$(x-ui settings 2>/dev/null | strip_ansi)
@@ -1167,10 +1224,14 @@ setup_ufw() {
                 red "Порт 3X-UI некорректен: $PORT_X_UI"
             fi
         fi
-        
+
         # Включаем UFW
-        echo "y" | ${USE_SUDO:+$USE_SUDO }ufw enable >/dev/null 2>&1
-        purple "ufw настроен и включен."
+        if echo "y" | ${USE_SUDO:+$USE_SUDO }ufw enable >/dev/null 2>&1; then
+            purple "ufw настроен и включен."
+        else
+            red "Ошибка при включении ufw. Проверьте статус вручную: ufw status"
+            return 1
+        fi
     else
         if [[ "$(prompt_yes_no "UFW включен, но не настроен, хотите выключить?" "no")" == "yes" ]]; then
             echo "y" | ${USE_SUDO:+$USE_SUDO }ufw disable >/dev/null 2>&1
@@ -1361,8 +1422,11 @@ ufw_menu() {
                     fi
                 fi
                 if [[ "$(prompt_yes_no "Включить ufw?" "no")" == "yes" ]]; then
-                    echo "y" | ${USE_SUDO:+$USE_SUDO }ufw enable >/dev/null 2>&1
-                    purple "ufw включен."
+                    if echo "y" | ${USE_SUDO:+$USE_SUDO }ufw enable >/dev/null 2>&1; then
+                        purple "ufw включен."
+                    else
+                        red "Ошибка при включении ufw. Проверьте: ufw status"
+                    fi
                 fi
                 ;;
             0)
@@ -1452,9 +1516,12 @@ maxretry = $F2B_RECIDIVE_MAXRETRY
 action = iptables-allports[name=recidive]
 EOF
     
-    systemctl enable fail2ban
-    systemctl start fail2ban
-    systemctl restart fail2ban
+    ${USE_SUDO:+$USE_SUDO }systemctl enable fail2ban
+    ${USE_SUDO:+$USE_SUDO }systemctl start fail2ban
+    if ! ${USE_SUDO:+$USE_SUDO }systemctl restart fail2ban; then
+        red "Ошибка: fail2ban не запустился. Проверьте /etc/fail2ban/jail.local и журнал: journalctl -u fail2ban"
+        return 1
+    fi
     purple "fail2ban установлен и настроен."
 }
 

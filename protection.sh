@@ -14,7 +14,7 @@ username=""
 password=""
 output=""
 USE_SUDO=""
-PROTECTION_VERSION="1.1.9"
+PROTECTION_VERSION="1.1.10"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 DOCKER_MENU_VERSION=1
 DOCKER_HELP_VERSION=1
@@ -675,7 +675,7 @@ prompt_yes_no() {
         case "$response" in
             [Yy]*) echo "yes"; return 0;;
             [Nn]*) echo "no"; return 1;;
-            *) red "Пожалуйста, введите 'yes' или 'no'.";;
+            *) red "Пожалуйста, введите 'yes' или 'no'." >&2;;
         esac
     done
 }
@@ -1224,16 +1224,7 @@ setup_ufw() {
             red "SSH порт из конфигурации некорректен: $CURRENT_SSH_PORT"
         fi
 
-        # Проверяем наличие 3X-UI и добавляем его порт
-        if command -v x-ui &>/dev/null; then
-            output=$(x-ui settings 2>/dev/null | strip_ansi)
-            PORT_X_UI=$(echo "$output" | grep -i "port:" | awk -F' ' '{print $2}' | xargs)
-            if [[ -n "$PORT_X_UI" ]] && validate_port "$PORT_X_UI" 1 65535; then
-                ufw_allow_port "$PORT_X_UI" tcp
-            elif [[ -n "$PORT_X_UI" ]]; then
-                red "Порт 3X-UI некорректен: $PORT_X_UI"
-            fi
-        fi
+
 
         # Включаем UFW
         if echo "y" | ${USE_SUDO:+$USE_SUDO }ufw enable >/dev/null 2>&1; then
@@ -1285,19 +1276,7 @@ ensure_ufw_ports() {
         red "SSH порт из конфигурации некорректен: $CURRENT_SSH_PORT"
     fi
     
-    # Порт 3X-UI
-    if command -v x-ui &>/dev/null; then
-        output=$(x-ui settings 2>/dev/null)
-        PORT_X_UI=$(echo "$output" | grep -i "port:" | awk -F' ' '{print $2}' | xargs)
-        if [[ -n "$PORT_X_UI" ]] && validate_port "$PORT_X_UI" 1 65535; then
-            if ! ufw_rule_exists "$PORT_X_UI/tcp"; then
-                ufw_allow_port "$PORT_X_UI" tcp
-                purple "Добавлен порт $PORT_X_UI/tcp в UFW."
-            fi
-        elif [[ -n "$PORT_X_UI" ]]; then
-            red "Порт 3X-UI некорректен: $PORT_X_UI"
-        fi
-    fi
+
     
 
 }
@@ -2268,27 +2247,6 @@ out_file() {
     fi
     echo "" | tee -a "$INFO_FILE"
     
-    # Проверяем наличие 3X-UI
-    if command -v x-ui &>/dev/null || [[ -f /usr/local/x-ui/x-ui.service ]] || systemctl list-unit-files 2>/dev/null | grep -q '^x-ui'; then
-        echo "------- Настройки для панели 3X-UI --------" | tee -a "$INFO_FILE"
-        if command -v x-ui &>/dev/null; then
-            output=$(x-ui settings 2>/dev/null | strip_ansi)
-            PORT_X_UI=$(echo "$output" | grep -i "port:" | awk -F' ' '{print $2}' | xargs)
-            USER_X_UI=$(echo "$output" | grep -i "username:" | awk -F' ' '{print $2}' | xargs)
-            PASS_X_UI=$(echo "$output" | grep -i "password:" | awk -F' ' '{print $2}' | xargs)
-            WEB_X_UI=$(echo "$output" | grep -i "webBasePath:" | awk -F' ' '{print $2}' | xargs)
-            ACC_X_UI=$(echo "$output" | grep -i "Access URL:" | awk -F' ' '{print $3}' | xargs)
-            
-            echo "username: $USER_X_UI" | tee -a "$INFO_FILE"
-            echo "password: $PASS_X_UI" | tee -a "$INFO_FILE"
-            echo "port: $PORT_X_UI" | tee -a "$INFO_FILE"
-            echo "webBasePath: $WEB_X_UI" | tee -a "$INFO_FILE"
-            echo "Access URL: $ACC_X_UI" | tee -a "$INFO_FILE"
-        else
-            echo "x-ui команда не найдена, пропускаем чтение настроек." | tee -a "$INFO_FILE"
-        fi
-
-    fi
 }
 
 

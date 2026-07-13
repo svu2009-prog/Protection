@@ -14,7 +14,7 @@ username=""
 password=""
 output=""
 USE_SUDO=""
-PROTECTION_VERSION="1.1.8"
+PROTECTION_VERSION="1.1.9"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 DOCKER_MENU_VERSION=1
 DOCKER_HELP_VERSION=1
@@ -1642,24 +1642,29 @@ fail2ban_menu() {
                 ;;
             5)
                 if select_fail2ban_jail; then
-                    echo "Список jail:"
+                    local banned_ips_map=() banned_ips_labels=() banned_ips_values=()
                     for j in $FB_JAILS; do
-                        echo "- $j"
-                    done
-                    for j in $FB_JAILS; do
-                        echo "------- Jail: $j -------"
-                        fb_status=$(${USE_SUDO:+$USE_SUDO }fail2ban-client status "$j" 2>/dev/null)
-                        echo "$fb_status"
-                    done
-                    local UNBAN_IP
-                    read -p "Введите IP для разбана: " UNBAN_IP
-                    if [[ -z "$UNBAN_IP" ]]; then
-                        red "IP не указан."
-                    else
-                        for j in $FB_JAILS; do
-                            ${USE_SUDO:+$USE_SUDO }fail2ban-client set "$j" unbanip "$UNBAN_IP" 2>/dev/null
+                        fb_out=$(${USE_SUDO:+$USE_SUDO }fail2ban-client status "$j" 2>/dev/null)
+                        banned_list=$(echo "$fb_out" | grep -i "Banned IP list" | awk -F':' '{print $2}' | xargs)
+                        for ip in $banned_list; do
+                            [[ " ${banned_ips_map[*]} " =~ " $ip " ]] || banned_ips_map+=("$ip")
                         done
-                        purple "IP $UNBAN_IP разбанен во всех jail (если был в бане)."
+                    done
+                    if [[ ${#banned_ips_map[@]} -eq 0 ]]; then
+                        yellow "Нет забаненных IP."
+                    else
+                        for i in "${!banned_ips_map[@]}"; do
+                            banned_ips_labels+=("$((i+1)). ${banned_ips_map[$i]}")
+                            banned_ips_values+=("$((i+1))")
+                        done
+                        select_menu "Выберите IP для разбана:" banned_ips_labels banned_ips_values
+                        if [[ -n "$MENU_CHOICE" ]]; then
+                            local selected_ip="${banned_ips_map[$((MENU_CHOICE - 1))]}"
+                            for j in $FB_JAILS; do
+                                ${USE_SUDO:+$USE_SUDO }fail2ban-client set "$j" unbanip "$selected_ip" 2>/dev/null
+                            done
+                            purple "IP $selected_ip разбанен во всех jail (если был в бане)."
+                        fi
                     fi
                 fi
                 ;;

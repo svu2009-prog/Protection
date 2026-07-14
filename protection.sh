@@ -14,7 +14,7 @@ username=""
 password=""
 output=""
 USE_SUDO=""
-PROTECTION_VERSION="1.1.10"
+PROTECTION_VERSION="1.1.11"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 DOCKER_MENU_VERSION=1
 DOCKER_HELP_VERSION=1
@@ -222,7 +222,7 @@ render_menu() {
     printf "\033[2K"
     echo " "
     printf "\033[2K"
-    yellow "Стрелки ↑/↓ - выбор, Enter - подтвердить, цифра - быстрый выбор"
+    yellow "Стрелки ↑/↓ - выбор, Enter - подтвердить, цифра + Enter - выбор по номеру"
 }
 
 # Универсальный выбор пункта меню стрелками, Enter или числом.
@@ -287,12 +287,26 @@ select_menu() {
         
         case "$key" in
             "")
-                MENU_CHOICE="${values_ref[$selected]}"
-                tput cnorm 2>/dev/null || true
-                echo " "
-                return 0
+                if [[ -n "$typed" ]]; then
+                    for i in "${!values_ref[@]}"; do
+                        if [[ "${values_ref[$i]}" == "$typed" ]]; then
+                            MENU_CHOICE="$typed"
+                            tput cnorm 2>/dev/null || true
+                            echo " "
+                            return 0
+                        fi
+                    done
+                    red "Некорректный выбор."
+                    typed=""
+                else
+                    MENU_CHOICE="${values_ref[$selected]}"
+                    tput cnorm 2>/dev/null || true
+                    echo " "
+                    return 0
+                fi
                 ;;
             $'\e')
+                typed=""
                 extra=""
                 IFS= read -rsn2 -t 0.05 extra || true
                 case "$extra" in
@@ -323,6 +337,7 @@ select_menu() {
                 esac
                 ;;
             q|Q)
+                typed=""
                 if [[ "$zero_value_index" -ge 0 ]]; then
                     MENU_CHOICE="0"
                     tput cnorm 2>/dev/null || true
@@ -331,19 +346,8 @@ select_menu() {
                 fi
                 ;;
             [0-9])
-                typed="$key"
-                while IFS= read -rsn1 -t 0.35 extra; do
-                    [[ "$extra" =~ ^[0-9]$ ]] || break
-                    typed+="$extra"
-                done
-                for i in "${!values_ref[@]}"; do
-                    if [[ "${values_ref[$i]}" == "$typed" ]]; then
-                        MENU_CHOICE="$typed"
-                        tput cnorm 2>/dev/null || true
-                        echo " "
-                        return 0
-                    fi
-                done
+                typed+="$key"
+                echo -n "$key"
                 ;;
         esac
     done

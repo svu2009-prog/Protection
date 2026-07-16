@@ -14,7 +14,7 @@ username=""
 password=""
 output=""
 USE_SUDO=""
-PROTECTION_VERSION="1.1.11"
+PROTECTION_VERSION="1.1.12"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 DOCKER_MENU_VERSION=1
 DOCKER_HELP_VERSION=1
@@ -2318,7 +2318,7 @@ main() {
             "1. Обновить пакеты"
             "2. Поменять пароль ROOT"
             "3. Поменять порт SSH"
-            "4. Создать нового пользователя"
+            "4. Управление пользователями"
             "5. Отключить\\включить доступ к команде PING"
             "6. Отключить\\включить IPv6"
             "7. Настроить SSH ключи"

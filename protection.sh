@@ -1,5 +1,7 @@
 #!/bin/bash
 
+set -o pipefail
+
 # ============================================================
 # СКРИПТ АВТОМАТИЗАЦИИ НАСТРОЙКИ СЕРВЕРА
 # Совместимость: Ubuntu, Debian (с sudo и без sudo)
@@ -14,7 +16,7 @@ username=""
 password=""
 output=""
 USE_SUDO=""
-PROTECTION_VERSION="1.1.12"
+PROTECTION_VERSION="1.1.13"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 DOCKER_MENU_VERSION=1
 DOCKER_HELP_VERSION=1
@@ -23,7 +25,9 @@ DOCKER_HELP_VERSION=1
 # КОНФИГУРАЦИЯ ПО УМОЛЧАНИЮ
 # ============================================================
 
-INFO_FILE="$(pwd)/info.txt"
+INFO_FILE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P)"
+[[ -z "$INFO_FILE_DIR" ]] && INFO_FILE_DIR="/root"
+INFO_FILE="$INFO_FILE_DIR/info.txt"
 
 F2B_BANTIME_DEFAULT=3600
 F2B_FINDTIME_DEFAULT=2400
@@ -162,7 +166,7 @@ ensure_global_command() {
 # Основная функция для цветного вывода
 color_echo() {
     local color_code=$1 message=$2
-    echo -e "\x1B[${color_code}m ${message} \x1B[0m"
+    printf '\033[%sm %s \033[0m\n' "$color_code" "$message"
 }
 
 # Цветные обертки для различных типов сообщений
@@ -451,13 +455,14 @@ install_sudo_package() {
     fi
 
     green "Устанавливаем sudo..."
-    apt update -y
-    apt install sudo -y
-    
-    if command -v sudo &>/dev/null; then
-        purple "sudo успешно установлен."
+    if apt update -y && apt install sudo -y; then
+        if command -v sudo &>/dev/null; then
+            purple "sudo успешно установлен."
+        else
+            red "sudo установлен, но binary недоступен в PATH."
+        fi
     else
-        red "Ошибка при установке sudo."
+        red "Ошибка при установке sudo (apt update/install завершился с ошибкой)."
     fi
 }
 
@@ -544,19 +549,19 @@ validate_password() {
     fi
     
     # Наличие строчных букв
-    if ! printf '%s\n' "$password" | grep -qP "[a-zа-я]"; then
+    if ! [[ "$password" =~ [a-zа-яё] ]]; then
         red "Пароль должен содержать хотя бы одну букву нижнего регистра."
         return 1
     fi
 
     # Наличие заглавных букв
-    if ! printf '%s\n' "$password" | grep -qP "[A-ZА-Я]"; then
+    if ! [[ "$password" =~ [A-ZА-ЯЁ] ]]; then
         red "Пароль должен содержать хотя бы одну букву верхнего регистра."
         return 1
     fi
 
     # Наличие цифр
-    if ! printf '%s\n' "$password" | grep -qP "[0-9]"; then
+    if ! [[ "$password" =~ [0-9] ]]; then
         red "Пароль должен содержать хотя бы одну цифру."
         return 1
     fi
@@ -589,26 +594,31 @@ add_user_nopasswd() {
     fi
     
     echo "$username ALL=(ALL) NOPASSWD:ALL" | tee "/etc/sudoers.d/$username" >/dev/null
-    purple "Пользователь $username добавлен в группу для выполнения команд без пароля."
+    if chmod 0440 "/etc/sudoers.d/$username" 2>/dev/null; then
+        purple "Пользователь $username добавлен в группу для выполнения команд без пароля."
+    else
+        red "Не удалось выставить права 0440 на /etc/sudoers.d/$username — sudo может игнорировать файл."
+    fi
 }
 
 # Удаление пользователя из sudoers (возврат требования пароля)
 remove_user_nopasswd() {
     local username=$1
-    rm -f /etc/sudoers.d/$username
+    rm -f "/etc/sudoers.d/$username"
     purple "Пользователь $username исключен из группы для выполнения команд без пароля."
 }
 
 # Изменение пароля существующего пользователя
 change_user_password() {
     local username=$1
-    
+    local password password_confirm
+
     while true; do
-        read -s -p "Введите новый пароль для пользователя $username: " password
+        read -rs -p "Введите новый пароль для пользователя $username: " password
         echo
-        
+
         if validate_password "$password"; then
-            read -s -p "Повторите новый пароль для пользователя $username: " password_confirm
+            read -rs -p "Повторите новый пароль для пользователя $username: " password_confirm
             echo
             
             if [[ "$password" == "$password_confirm" ]]; then
@@ -634,11 +644,11 @@ change_root_pass() {
     fi
     
     while true; do
-        read -s -p "Введите новый пароль для root: " ROOT_PASSWORD
+        read -rs -p "Введите новый пароль для root: " ROOT_PASSWORD
         echo
         
         if validate_password "$ROOT_PASSWORD"; then
-            read -s -p "Повторите новый пароль для root: " ROOT_PASSWORD_CONFIRM
+            read -rs -p "Повторите новый пароль для root: " ROOT_PASSWORD_CONFIRM
             echo
             
             if [[ "$ROOT_PASSWORD" == "$ROOT_PASSWORD_CONFIRM" ]]; then
@@ -673,7 +683,7 @@ prompt_yes_no() {
     esac
     
     while true; do
-        read -p "$prompt (yes/no)$default_hint: " response
+        read -r -p "$prompt (yes/no)$default_hint: " response
         [[ -z "$response" && -n "$default" ]] && response="$default"
         
         case "$response" in
@@ -694,6 +704,7 @@ disable_ipv6() {
     IPV6_STATUS_ALL=$(sysctl net.ipv6.conf.all.disable_ipv6 2>/dev/null | awk '{print $3}')
     IPV6_STATUS_DEFAULT=$(sysctl net.ipv6.conf.default.disable_ipv6 2>/dev/null | awk '{print $3}')
     IPV6_STATUS_LO=$(sysctl net.ipv6.conf.lo.disable_ipv6 2>/dev/null | awk '{print $3}')
+
     
     # Если IPv6 уже отключен
     if [[ "$IPV6_STATUS_ALL" == "1" && "$IPV6_STATUS_DEFAULT" == "1" && "$IPV6_STATUS_LO" == "1" ]]; then
@@ -727,9 +738,11 @@ EOF
     sysctl -p >/dev/null 2>&1
     
     # Проверяем, что IPv6 отключен
-    if sysctl net.ipv6.conf.all.disable_ipv6 | grep -q "1" && \
-       sysctl net.ipv6.conf.default.disable_ipv6 | grep -q "1" && \
-       sysctl net.ipv6.conf.lo.disable_ipv6 | grep -q "1"; then
+    local ipv6_all ipv6_default ipv6_lo
+    ipv6_all=$(sysctl net.ipv6.conf.all.disable_ipv6 2>/dev/null | awk '{print $3}')
+    ipv6_default=$(sysctl net.ipv6.conf.default.disable_ipv6 2>/dev/null | awk '{print $3}')
+    ipv6_lo=$(sysctl net.ipv6.conf.lo.disable_ipv6 2>/dev/null | awk '{print $3}')
+    if [[ "$ipv6_all" == "1" && "$ipv6_default" == "1" && "$ipv6_lo" == "1" ]]; then
         purple "IPv6 успешно отключен во всех интерфейсах."
         green "Рекомендуется перезагрузить систему для полного применения изменений."
     else
@@ -768,7 +781,7 @@ select_non_system_user() {
     
     while true; do
         select_menu "Список доступных пользователей:" user_labels user_values
-        user_num="$MENU_CHOICE"
+        local user_num="$MENU_CHOICE"
         if [[ "$user_num" =~ ^[0-9]+$ && "$user_num" -ge 1 && "$user_num" -le ${#users_list[@]} ]]; then
             SELECTED_USER="${users_list[$((user_num-1))]}"
             return 0
@@ -802,13 +815,13 @@ select_user_for_ssh_keys() {
     
     while true; do
         select_menu "Список доступных пользователей:" user_labels user_values
-        user_num="$MENU_CHOICE"
+        local user_num="$MENU_CHOICE"
         if [[ "$user_num" =~ ^[0-9]+$ ]]; then
             if [[ "$user_num" -ge 1 && "$user_num" -le ${#users_list[@]} ]]; then
                 SELECTED_USER="${users_list[$((user_num-1))]}"
                 return 0
             elif [[ "$user_num" -eq $(( ${#users_list[@]} + 1 )) ]]; then
-                read -p "Введите имя пользователя: " manual_user
+                read -r -p "Введите имя пользователя: " manual_user
                 if [[ -z "$manual_user" ]]; then
                     red "Имя пользователя не указано."
                     return 1
@@ -881,7 +894,7 @@ users_menu() {
                 ;;
             5)
                 if select_non_system_user; then
-                    read -p "Введите имя группы: " TARGET_GROUP
+                    read -r -p "Введите имя группы: " TARGET_GROUP
                     if [[ -z "$TARGET_GROUP" ]]; then
                         red "Имя группы не указано."
                     elif ! getent group "$TARGET_GROUP" &>/dev/null; then
@@ -994,7 +1007,7 @@ setup_ssh_keys() {
     echo
     
     # Ожидание подтверждения пользователя
-    read -p "Если выполнили все действия до номера 5 включительно, нажмите ENTER: "
+    read -r -p "Если выполнили все действия до номера 5 включительно, нажмите ENTER: "
     
     # Открытие файла authorized_keys для редактирования
     ${USE_SUDO:+$USE_SUDO }nano "/home/$username/.ssh/authorized_keys"
@@ -1060,10 +1073,10 @@ create_user() {
 
 # Функция для отключения/включения ICMP ping
 disable_ping() {
-    if grep -q "^net.ipv4.icmp_echo_ignore_all" /etc/sysctl.conf; then
-        PING_STATUS=$(grep '^net.ipv4.icmp_echo_ignore_all' /etc/sysctl.conf)
-        
-        if [[ "$PING_STATUS" == "net.ipv4.icmp_echo_ignore_all = 0" ]]; then
+    if grep -qE '^[[:space:]]*net.ipv4.icmp_echo_ignore_all' /etc/sysctl.conf; then
+        PING_STATUS=$(grep -E '^[[:space:]]*net.ipv4.icmp_echo_ignore_all' /etc/sysctl.conf | tail -n 1 | awk -F'=' '{gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2}')
+
+        if [[ "$PING_STATUS" == "0" ]]; then
             if [[ "$(prompt_yes_no "Доступ к команде ping включен. Хотите отключить доступ к команде ping?" "no")" == "yes" ]]; then
                 cp /etc/sysctl.conf /etc/sysctl.conf.bak || { red "Не удалось создать резервную копию sysctl.conf."; return 1; }
                 sed -i 's/net.ipv4.icmp_echo_ignore_all .*/net.ipv4.icmp_echo_ignore_all = 1/' /etc/sysctl.conf
@@ -1146,7 +1159,7 @@ change_port_ssh() {
     fi
 
     while true; do
-        read -p 'Введите новый порт SSH (от 1024 до 65535): ' NEW_SSH_PORT
+        read -r -p 'Введите новый порт SSH (от 1024 до 65535): ' NEW_SSH_PORT
         
         if validate_ssh_port "$NEW_SSH_PORT"; then
             if port_in_use "$NEW_SSH_PORT"; then
@@ -1199,11 +1212,11 @@ setup_ufw() {
     fi
 
     # Устанавливаем ufw, если не установлен
-    if ! dpkg -l | grep -q "^ii  ufw"; then
+    if ! dpkg-query -W -f='${Status}' ufw 2>/dev/null | grep -q "install ok installed"; then
         apt install -yq ufw
     fi
     
-    CHECK_UFW=$(${USE_SUDO:+$USE_SUDO }ufw status 2>/dev/null)
+    local CHECK_UFW=$(${USE_SUDO:+$USE_SUDO }ufw status 2>/dev/null)
     
     if [[ "$CHECK_UFW" == "Status: inactive" ]]; then
         if [[ "$(prompt_yes_no "Хотите включить и настроить ufw?" "no")" == "no" ]]; then
@@ -1288,12 +1301,12 @@ ensure_ufw_ports() {
 # Подменю управления UFW
 ufw_menu() {
     # Если ufw не установлен или не активен — выполняем стандартную установку/настройку
-    if ! dpkg -l | grep -q "^ii  ufw"; then
+    if ! dpkg-query -W -f='${Status}' ufw 2>/dev/null | grep -q "install ok installed"; then
             setup_ufw
         return
     fi
     
-    UFW_STATUS=$(${USE_SUDO:+$USE_SUDO }ufw status 2>/dev/null)
+    local UFW_STATUS=$(${USE_SUDO:+$USE_SUDO }ufw status 2>/dev/null)
     if echo "$UFW_STATUS" | grep -q "Status: inactive"; then
             setup_ufw
         return
@@ -1315,7 +1328,7 @@ ufw_menu() {
         local ufw_menu_values=(1 2 3 4 5 6 0)
         
         select_menu "Подменю управления Firewall UFW" ufw_menu_labels ufw_menu_values
-        UFW_MENU="$MENU_CHOICE"
+        local UFW_MENU="$MENU_CHOICE"
         
         case $UFW_MENU in
             1)
@@ -1324,13 +1337,14 @@ ufw_menu() {
                 ;;
             2)
                 while true; do
-                    read -p "Введите порты для добавления (TCP, через пробел): " UFW_TCP_PORTS
+                    read -r -p "Введите порты для добавления (TCP, через пробел): " UFW_TCP_PORTS
                     if [[ -z "${UFW_TCP_PORTS// /}" ]]; then
                         red "Ни один порт не введён."
                         continue
                     fi
-                    UFW_ADDED_COUNT=0
-                    UFW_ADDED_LIST=""
+                    local UFW_ADDED_COUNT=0
+                    local UFW_ADDED_LIST=""
+                    local UFW_TCP_PORT
                     for UFW_TCP_PORT in $UFW_TCP_PORTS; do
                         if validate_port "$UFW_TCP_PORT" 1 65535; then
                             ufw_allow_port "$UFW_TCP_PORT" tcp
@@ -1347,13 +1361,14 @@ ufw_menu() {
                 ;;
             3)
                 while true; do
-                    read -p "Введите порты для добавления (UDP, через пробел): " UFW_UDP_PORTS
+                    read -r -p "Введите порты для добавления (UDP, через пробел): " UFW_UDP_PORTS
                     if [[ -z "${UFW_UDP_PORTS// /}" ]]; then
                         red "Ни один порт не введён."
                         continue
                     fi
-                    UFW_ADDED_COUNT=0
-                    UFW_ADDED_LIST=""
+                    local UFW_ADDED_COUNT=0
+                    local UFW_ADDED_LIST=""
+                    local UFW_UDP_PORT
                     for UFW_UDP_PORT in $UFW_UDP_PORTS; do
                         if validate_port "$UFW_UDP_PORT" 1 65535; then
                             ufw_allow_port "$UFW_UDP_PORT" udp
@@ -1369,20 +1384,21 @@ ufw_menu() {
                 done
                 ;;
             4)
-                UFW_RULES_RAW=$(${USE_SUDO:+$USE_SUDO }ufw status 2>/dev/null | grep -i " ALLOW " | awk '{print $1}')
+                local UFW_RULES_RAW=$(${USE_SUDO:+$USE_SUDO }ufw status 2>/dev/null | grep -i " ALLOW " | awk '{print $1}')
                 if [[ -z "$UFW_RULES_RAW" ]]; then
                     red "Нет правил для удаления."
                     continue
                 fi
-                UFW_DEL_LABELS=()
-                UFW_DEL_VALUES=()
+                local UFW_DEL_LABELS=()
+                local UFW_DEL_VALUES=()
+                local UFW_RULE
                 for UFW_RULE in $UFW_RULES_RAW; do
                     UFW_DEL_LABELS+=("$UFW_RULE")
                     UFW_DEL_VALUES+=("$UFW_RULE")
                 done
                 select_menu "Выберите порт для удаления:" UFW_DEL_LABELS UFW_DEL_VALUES
-                UFW_DEL_PORT="${MENU_CHOICE%%/*}"
-                UFW_DEL_PROTO="${MENU_CHOICE##*/}"
+                local UFW_DEL_PORT="${MENU_CHOICE%%/*}"
+                local UFW_DEL_PROTO="${MENU_CHOICE##*/}"
                 if echo "y" | ${USE_SUDO:+$USE_SUDO }ufw delete allow "$UFW_DEL_PORT/$UFW_DEL_PROTO" >/dev/null 2>&1; then
                     purple "Правило $UFW_DEL_PORT/$UFW_DEL_PROTO удалено."
                 else
@@ -1446,10 +1462,15 @@ install_fail2ban() {
     # Устанавливаем nftables, если не установлен
     if ! command -v nft &>/dev/null; then
         green "Устанавливаем nftables..."
-        apt install -yq nftables
-        systemctl enable nftables
-        systemctl start nftables
-        purple "nftables успешно установлен и запущен."
+        if ! apt install -yq nftables; then
+            red "Не удалось установить nftables."
+            return 1
+        fi
+        if systemctl enable nftables 2>/dev/null && systemctl start nftables 2>/dev/null; then
+            purple "nftables успешно установлен и запущен."
+        else
+            yellow "nftables установлен, но не удалось включить/запустить службу. Проверьте вручную."
+        fi
     else
         green "nftables уже установлен."
     fi
@@ -1561,7 +1582,7 @@ select_fail2ban_jail() {
 # Подменю управления Fail2ban
 fail2ban_menu() {
     # Если fail2ban не установлен — выполняем стандартную установку/настройку
-    if ! dpkg -l | grep -q "^ii  fail2ban"; then
+    if ! dpkg-query -W -f='${Status}' fail2ban 2>/dev/null | grep -q "install ok installed"; then
         install_fail2ban
         return
     fi
@@ -1582,7 +1603,7 @@ fail2ban_menu() {
         local fb_menu_values=(1 2 3 4 5 6 7 8 9 0)
         
         select_menu "Подменю управления Fail2ban" fb_menu_labels fb_menu_values
-        FB_MENU="$MENU_CHOICE"
+        local FB_MENU="$MENU_CHOICE"
         
         case $FB_MENU in
             1)
@@ -1595,12 +1616,13 @@ fail2ban_menu() {
             3)
                 if select_fail2ban_jail; then
                     echo "Список jail:"
+                    local j
                     for j in $FB_JAILS; do
                         echo "- $j"
                     done
                     for j in $FB_JAILS; do
                         echo "------- Jail: $j -------"
-                        fb_status=$(${USE_SUDO:+$USE_SUDO }fail2ban-client status "$j" 2>/dev/null)
+                        local fb_status=$(${USE_SUDO:+$USE_SUDO }fail2ban-client status "$j" 2>/dev/null)
                         echo "$fb_status"
                     done
                 fi
@@ -1608,13 +1630,14 @@ fail2ban_menu() {
             4)
                 if select_fail2ban_jail; then
                     echo "Список jail:"
+                    local j
                     for j in $FB_JAILS; do
                         echo "- $j"
                     done
                     for j in $FB_JAILS; do
                         echo "------- Jail: $j -------"
-                        fb_out=$(${USE_SUDO:+$USE_SUDO }fail2ban-client status "$j" 2>/dev/null)
-                        banned_list=$(echo "$fb_out" | grep -i "Banned IP list" | awk -F':' '{print $2}' | xargs)
+                        local fb_out=$(${USE_SUDO:+$USE_SUDO }fail2ban-client status "$j" 2>/dev/null)
+                        local banned_list=$(echo "$fb_out" | grep -i "Banned IP list" | awk -F':' '{print $2}' | xargs)
                         if [[ -z "$banned_list" ]]; then
                             yellow "Забаненных IP в jail $j нет."
                         else
@@ -1626,9 +1649,11 @@ fail2ban_menu() {
             5)
                 if select_fail2ban_jail; then
                     local banned_ips_map=() banned_ips_labels=() banned_ips_values=()
+                    local j
                     for j in $FB_JAILS; do
-                        fb_out=$(${USE_SUDO:+$USE_SUDO }fail2ban-client status "$j" 2>/dev/null)
-                        banned_list=$(echo "$fb_out" | grep -i "Banned IP list" | awk -F':' '{print $2}' | xargs)
+                        local fb_out=$(${USE_SUDO:+$USE_SUDO }fail2ban-client status "$j" 2>/dev/null)
+                        local banned_list=$(echo "$fb_out" | grep -i "Banned IP list" | awk -F':' '{print $2}' | xargs)
+                        local ip
                         for ip in $banned_list; do
                             [[ " ${banned_ips_map[*]} " =~ " $ip " ]] || banned_ips_map+=("$ip")
                         done
@@ -1653,16 +1678,25 @@ fail2ban_menu() {
                 ;;
 
             6)
-                ${USE_SUDO:+$USE_SUDO }systemctl start fail2ban 2>/dev/null
-                purple "fail2ban запущен."
+                if ${USE_SUDO:+$USE_SUDO }systemctl start fail2ban 2>/dev/null; then
+                    purple "fail2ban запущен."
+                else
+                    red "Не удалось запустить fail2ban."
+                fi
                 ;;
             7)
-                ${USE_SUDO:+$USE_SUDO }systemctl stop fail2ban 2>/dev/null
-                purple "fail2ban остановлен."
+                if ${USE_SUDO:+$USE_SUDO }systemctl stop fail2ban 2>/dev/null; then
+                    purple "fail2ban остановлен."
+                else
+                    red "Не удалось остановить fail2ban."
+                fi
                 ;;
             8)
-                ${USE_SUDO:+$USE_SUDO }systemctl restart fail2ban 2>/dev/null
-                purple "fail2ban перезапущен."
+                if ${USE_SUDO:+$USE_SUDO }systemctl restart fail2ban 2>/dev/null; then
+                    purple "fail2ban перезапущен."
+                else
+                    red "Не удалось перезапустить fail2ban."
+                fi
                 ;;
             9)
                 if [[ -f /var/log/auth.log ]]; then
@@ -1727,7 +1761,7 @@ docker_menu() {
         docker_menu_title="Подменю Docker | Docker: ${docker_version:-не установлен} | Compose: ${compose_version:-не установлен}"
         
         select_menu "$docker_menu_title" docker_menu_labels docker_menu_values
-        DOCKER_MENU="$MENU_CHOICE"
+        local DOCKER_MENU="$MENU_CHOICE"
         
         case $DOCKER_MENU in
             1)
@@ -1736,9 +1770,11 @@ docker_menu() {
             2)
                 if command -v docker &>/dev/null; then
                     if [[ "$(prompt_yes_no "Хотите обновить Docker?" "no")" == "yes" ]]; then
-                        apt-get update
-                        apt-get upgrade -y docker-ce docker-ce-cli containerd.io
-                        purple "Docker успешно обновлен."
+                        if apt-get update && apt-get upgrade -y docker-ce docker-ce-cli containerd.io; then
+                            purple "Docker успешно обновлен."
+                        else
+                            red "Ошибка при обновлении Docker."
+                        fi
                     fi
                 else
                     red "Docker не установлен."
@@ -1756,9 +1792,10 @@ docker_menu() {
                                 fi
                             else
                                 local COMPOSE_PATH
-                                read -p "Введите путь к файлу compose (или папке), или оставьте пустым для поиска: " COMPOSE_PATH
+                                read -r -p "Введите путь к файлу compose (или папке), или оставьте пустым для поиска: " COMPOSE_PATH
                                 if [[ -z "$COMPOSE_PATH" ]]; then
                                     echo "Ищем compose-файлы в /opt, /srv, /root, /home (это может занять время)..."
+                                    local compose_files=()
                                     mapfile -t compose_files < <(find /opt /srv /root /home -maxdepth 6 -type f \( -name 'docker-compose.yml' -o -name 'docker-compose.yaml' -o -name 'compose.yml' -o -name 'compose.yaml' \) 2>/dev/null)
                                     if [[ ${#compose_files[@]} -eq 0 ]]; then
                                         red "Файлы compose не найдены."
@@ -1808,6 +1845,7 @@ docker_menu() {
             4)
                 if command -v docker &>/dev/null; then
                     if [[ "$(prompt_yes_no "Остановить все контейнеры?" "no")" == "yes" ]]; then
+                        local running_containers=()
                         mapfile -t running_containers < <(docker ps -q)
                         if [[ ${#running_containers[@]} -eq 0 ]]; then
                             yellow "Запущенные контейнеры не найдены."
@@ -1824,6 +1862,7 @@ docker_menu() {
             5)
                 if command -v docker &>/dev/null; then
                     if [[ "$(prompt_yes_no "Запустить все контейнеры?" "no")" == "yes" ]]; then
+                        local all_containers=()
                         mapfile -t all_containers < <(docker ps -aq)
                         if [[ ${#all_containers[@]} -eq 0 ]]; then
                             yellow "Контейнеры не найдены."
@@ -1840,6 +1879,7 @@ docker_menu() {
             6)
                 if command -v docker &>/dev/null; then
                     if [[ "$(prompt_yes_no "Перезапустить все контейнеры?" "no")" == "yes" ]]; then
+                        local all_containers=()
                         mapfile -t all_containers < <(docker ps -aq)
                         if [[ ${#all_containers[@]} -eq 0 ]]; then
                             yellow "Контейнеры не найдены."
@@ -1855,6 +1895,7 @@ docker_menu() {
                 ;;
             7)
                 if command -v docker &>/dev/null; then
+                    local containers_list=()
                     mapfile -t containers_list < <(docker ps -a --format "{{.Names}}")
                     if [[ ${#containers_list[@]} -eq 0 ]]; then
                         red "Контейнеры не найдены."
@@ -1869,13 +1910,13 @@ docker_menu() {
                         container_values+=("$(( ${#containers_list[@]} + 1 ))")
                         
                         select_menu "Список контейнеров:" container_labels container_values
-                        cnum="$MENU_CHOICE"
-                        DOCKER_NAME=""
+                        local cnum="$MENU_CHOICE"
+                        local DOCKER_NAME=""
                         if [[ "$cnum" =~ ^[0-9]+$ ]]; then
                             if [[ "$cnum" -ge 1 && "$cnum" -le ${#containers_list[@]} ]]; then
                                 DOCKER_NAME="${containers_list[$((cnum-1))]}"
                             elif [[ "$cnum" -eq $(( ${#containers_list[@]} + 1 )) ]]; then
-                                read -p "Введите имя контейнера: " DOCKER_NAME
+                                read -r -p "Введите имя контейнера: " DOCKER_NAME
                             fi
                         fi
                         if [[ -z "$DOCKER_NAME" ]]; then
@@ -1917,8 +1958,11 @@ docker_menu() {
             11)
                 if command -v docker &>/dev/null; then
                     if [[ "$(prompt_yes_no "Удалить неиспользуемые образы/тома?" "no")" == "yes" ]]; then
-                        docker system prune -af --volumes
-                        purple "Неиспользуемые образы и тома удалены."
+                        if docker system prune -af --volumes; then
+                            purple "Неиспользуемые образы и тома удалены."
+                        else
+                            red "Ошибка при очистке образов/томов."
+                        fi
                     fi
                 else
                     red "Docker не установлен."
@@ -1927,8 +1971,11 @@ docker_menu() {
             12)
                 if command -v docker &>/dev/null; then
                     if [[ "$(prompt_yes_no "Удалить остановленные контейнеры?" "no")" == "yes" ]]; then
-                        docker container prune -f
-                        purple "Остановленные контейнеры удалены."
+                        if docker container prune -f; then
+                            purple "Остановленные контейнеры удалены."
+                        else
+                            red "Ошибка при очистке контейнеров."
+                        fi
                     fi
                 else
                     red "Docker не установлен."
@@ -1937,6 +1984,7 @@ docker_menu() {
             13)
                 if command -v docker &>/dev/null; then
                     if [[ "$(prompt_yes_no "Удалить все контейнеры?" "no")" == "yes" ]]; then
+                        local all_containers=()
                         mapfile -t all_containers < <(docker ps -aq)
                         if [[ ${#all_containers[@]} -eq 0 ]]; then
                             yellow "Контейнеры не найдены."
@@ -1954,13 +2002,16 @@ docker_menu() {
                 if [[ "$(prompt_yes_no "Полностью удалить Docker?" "no")" == "yes" ]]; then
                     ${USE_SUDO:+$USE_SUDO }systemctl stop docker 2>/dev/null
                     ${USE_SUDO:+$USE_SUDO }systemctl stop docker.socket 2>/dev/null
-                    ${USE_SUDO:+$USE_SUDO }apt-get purge -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker.io docker-compose >/dev/null 2>&1
-                    ${USE_SUDO:+$USE_SUDO }apt-get autoremove -y >/dev/null 2>&1
-                    ${USE_SUDO:+$USE_SUDO }rm -rf /var/lib/docker /var/lib/containerd
-                    if command -v docker &>/dev/null; then
-                        yellow "Docker удален не полностью: найден бинарник $(command -v docker). Проверьте альтернативный способ установки."
+                    if ${USE_SUDO:+$USE_SUDO }apt-get purge -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker.io docker-compose >/dev/null 2>&1; then
+                        ${USE_SUDO:+$USE_SUDO }apt-get autoremove -y >/dev/null 2>&1
+                        ${USE_SUDO:+$USE_SUDO }rm -rf /var/lib/docker /var/lib/containerd
+                        if command -v docker &>/dev/null; then
+                            yellow "Docker удален не полностью: найден бинарник $(command -v docker). Проверьте альтернативный способ установки."
+                        else
+                            purple "Docker полностью удален."
+                        fi
                     else
-                        purple "Docker полностью удален."
+                        red "Ошибка при apt-get purge Docker. Каталоги /var/lib/docker НЕ удалены во избежание потери данных при сбое. Проверьте вручную."
                     fi
                 fi
                 ;;
@@ -2035,7 +2086,7 @@ select_existing_user() {
     
     while true; do
         select_menu "Список доступных пользователей:" user_labels user_values
-        user_num="$MENU_CHOICE"
+        local user_num="$MENU_CHOICE"
         
         if [[ "$user_num" =~ ^[0-9]+$ ]]; then
             if [[ "$user_num" -ge 1 ]] && [[ "$user_num" -le ${#users_list[@]} ]]; then
@@ -2105,7 +2156,10 @@ install_docker() {
             green "curl недоступен, используем wget для установки Docker..."
             yellow "ВНИМАНИЕ: Следующая команда скачает и запустит скрипт с get.docker.com."
             yellow "Убедитесь, что вы доверяете источнику, перед продолжением."
-            wget -qO- https://get.docker.com | sh
+            if ! wget -qO- https://get.docker.com | sh; then
+                red "Ошибка при установке Docker через wget."
+                return 1
+            fi
             return
         fi
     fi
@@ -2115,7 +2169,10 @@ install_docker() {
     yellow "ВНИМАНИЕ: Следующая команда скачает и запустит скрипт с get.docker.com."
     yellow "Убедитесь, что вы доверяете источнику, перед продолжением."
     apt-get update
-    curl -fsSL https://get.docker.com | sh
+    if ! curl -fsSL https://get.docker.com | sh; then
+        red "Ошибка при установке Docker через curl."
+        return 1
+    fi
 
     # Проверяем установку
     if docker --version &>/dev/null; then
@@ -2160,12 +2217,12 @@ new_user() {
         
         # Выбор имени пользователя
         while true; do
-            recommended_username=$(head -c 64 /dev/urandom | tr -dc a-z | head -c 1; head -c 64 /dev/urandom | tr -dc a-z0-9 | head -c 7)
+            local recommended_username=$(head -c 64 /dev/urandom | tr -dc a-z | head -c 1; head -c 64 /dev/urandom | tr -dc a-z0-9 | head -c 7)
             
             if [[ "$(prompt_yes_no "Рекомендуемое имя пользователя $recommended_username, оставить?" "yes")" == "yes" ]]; then
                 username=$recommended_username
             else
-                read -p "Введите имя пользователя: " username
+                read -r -p "Введите имя пользователя: " username
             fi
             
             validate_username "$username" && break
@@ -2180,7 +2237,11 @@ new_user() {
             fi
             
             if [[ -n "$USE_SUDO" ]]; then
-                if grep -qF "$username ALL=(ALL) NOPASSWD:ALL" /etc/sudoers.d/* 2>/dev/null; then
+                local sudoers_found="no"
+                if [[ -d /etc/sudoers.d ]] && grep -rqF "$username ALL=(ALL) NOPASSWD:ALL" /etc/sudoers.d 2>/dev/null; then
+                    sudoers_found="yes"
+                fi
+                if [[ "$sudoers_found" == "yes" ]]; then
                     if [[ "$(prompt_yes_no "Хотите исключить пользователя $username из группы для выполнения команд без пароля?" "no")" == "yes" ]]; then
                         remove_user_nopasswd "$username"
                     fi
@@ -2196,19 +2257,19 @@ new_user() {
         else
             # Создание нового пользователя
             while true; do
-                recommended_password=$(head -c 64 /dev/urandom | tr -dc A-Za-z0-9 | head -c 15)
+                local recommended_password=$(head -c 64 /dev/urandom | tr -dc A-Za-z0-9 | head -c 15)
                 
                 if [[ "$(prompt_yes_no "Рекомендуемый пароль пользователя $recommended_password, оставить?" "yes")" == "yes" ]]; then
                     password=$recommended_password
                 else
-                    read -s -p "Введите пароль для пользователя $username: " password
+                    read -rs -p "Введите пароль для пользователя $username: " password
                     echo
                     
                     if ! validate_password "$password"; then
                         continue
                     fi
                     
-                    read -s -p "Повторите пароль для пользователя $username: " password_confirm
+                    read -rs -p "Повторите пароль для пользователя $username: " password_confirm
                     echo
                     
                     if [[ "$password" != "$password_confirm" ]]; then
@@ -2235,22 +2296,22 @@ new_user() {
 
 # Функция для сохранения всех настроек в файл
 out_file() {
-    echo "" | tee "$INFO_FILE"
-    
-    CURRENT_SSH_PORT=$(get_ssh_port)
-    
-    [[ -n "$ROOT_PASSWORD" ]] && echo "Пароль root = $ROOT_PASSWORD" | tee -a "$INFO_FILE"
-    [[ -n "$CURRENT_SSH_PORT" ]] && echo "Порт SSH = $CURRENT_SSH_PORT" | tee -a "$INFO_FILE"
-    [[ -n "$username" ]] && echo "Новый пользователь = $username" | tee -a "$INFO_FILE"
-    [[ -n "$password" ]] && echo "Пароль нового пользователя = $password" | tee -a "$INFO_FILE"
-
-    if [[ -n "$ROOT_PASSWORD" || -n "$password" ]]; then
-        echo "" | tee -a "$INFO_FILE"
-        echo "ВНИМАНИЕ: Данный файл содержит пароли в открытом виде!" | tee -a "$INFO_FILE"
-        echo "Рекомендуется удалить файл $INFO_FILE после сохранения паролей в безопасном месте." | tee -a "$INFO_FILE"
-    fi
-    echo "" | tee -a "$INFO_FILE"
-    
+    ( umask 077; : > "$INFO_FILE" ) 2>/dev/null
+    chmod 600 "$INFO_FILE" 2>/dev/null
+    {
+        echo ""
+        CURRENT_SSH_PORT=$(get_ssh_port)
+        [[ -n "$ROOT_PASSWORD" ]] && echo "Пароль root = $ROOT_PASSWORD"
+        [[ -n "$CURRENT_SSH_PORT" ]] && echo "Порт SSH = $CURRENT_SSH_PORT"
+        [[ -n "$username" ]] && echo "Новый пользователь = $username"
+        [[ -n "$password" ]] && echo "Пароль нового пользователя = $password"
+        if [[ -n "$ROOT_PASSWORD" || -n "$password" ]]; then
+            echo ""
+            echo "ВНИМАНИЕ: Данный файл содержит пароли в открытом виде!"
+            echo "Рекомендуется удалить файл $INFO_FILE после сохранения паролей в безопасном месте."
+        fi
+        echo ""
+    } >> "$INFO_FILE"
 }
 
 

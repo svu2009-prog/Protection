@@ -1,0 +1,49 @@
+# === Секреты и чувствительные данные — НЕ индексировать, НЕ отправлять в модель ===
+
+# Файлы окружения
+.env
+.env.*
+*.env
+.envrc
+
+# Ключи и сертификаты
+*.key
+*.pem
+*.crt
+*.cer
+*.p12
+*.pfx
+id_rsa
+id_rsa.pub
+*.p8
+*.pem
+*.pri
+
+# Токены / секреты / пароли
+*secret*
+*credential*
+*.token
+*.credentials
+secrets.*
+credentials.json
+*.jwk
+service-account*.json
+
+# Ключи SSH
+.ssh/
+id_ed25519
+id_ecdsa
+id_dsa
+
+# Прочая чувствительная инфраструктура
+*.keystore
+*.jks
+wallet.dat
+.vault-token
+
+# Файлы с паролями (рантайм-вывод скрипта)
+info.txt
+*.authinfo
+
+# Бэкапы и кэши graphify не трогаем, но их содержимое не должно содержать секреты
+graphify-out/

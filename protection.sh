@@ -14,12 +14,9 @@ PING_STATUS=""
 CURRENT_SSH_PORT=""
 username=""
 password=""
-output=""
 USE_SUDO=""
-PROTECTION_VERSION="1.1.14"
+PROTECTION_VERSION="1.2.0"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
-DOCKER_MENU_VERSION=1
-DOCKER_HELP_VERSION=1
 
 # ============================================================
 # КОНФИГУРАЦИЯ ПО УМОЛЧАНИЮ
@@ -388,11 +385,11 @@ check_internet() {
 port_in_use() {
     local port=$1
     if command -v ss &>/dev/null; then
-        ss -ltn 2>/dev/null | awk '{print $4}' | grep -qF ":$port\$"
+        ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE ":$port\$"
         return $?
     fi
     if command -v netstat &>/dev/null; then
-        netstat -ltn 2>/dev/null | awk '{print $4}' | grep -qF ":$port\$"
+        netstat -ltn 2>/dev/null | awk '{print $4}' | grep -qE ":$port\$"
         return $?
     fi
     return 1
@@ -486,7 +483,9 @@ validate_ssh_port() {
 # Получение текущего порта SSH из конфигурации
 get_ssh_port() {
     local port
-    port=$(grep -i '^Port' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | xargs)
+    # Фактическое значение (учитывает Include sshd_config.d), fallback на основной конфиг
+    port=$(sshd -T 2>/dev/null | awk '/^port[[:space:]]/ {print $2; exit}')
+    [[ -z "$port" ]] && port=$(grep -i '^Port' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | xargs)
     [[ -z "$port" ]] && port=22
     echo "$port"
 }
@@ -761,66 +760,54 @@ get_non_system_users() {
     getent passwd | awk -F: '$3 >= 1000 && $3 < 65534 && $1 != "ubuntu" {print $1}' | grep -vE '(nologin|false|sync|halt|shutdown)'
 }
 
-# Выбор пользователя из списка
+# Выбор несистемного пользователя. $1="manual" — добавить ручной ввод имени,
+# $2="create" — добавить пункт создания нового пользователя (в группы sudo и docker).
 select_non_system_user() {
+    local allow_manual=${1:-""} allow_create=${2:-""}
     local users_list=()
     mapfile -t users_list < <(get_non_system_users)
-    local user_labels=()
-    local user_values=()
-    
+    local user_labels=() user_values=()
+    local manual_user="" manual_index=0 create_index=0 extra_index user_num
+
+    SELECTED_USER=""
+
     if [[ ${#users_list[@]} -eq 0 ]]; then
-        red "Нет подходящих пользователей."
-        SELECTED_USER=""
-        return 1
-    fi
-    
-    for i in "${!users_list[@]}"; do
-        user_labels+=("$((i+1)). ${users_list[$i]}")
-        user_values+=("$((i+1))")
-    done
-    
-    while true; do
-        select_menu "Список доступных пользователей:" user_labels user_values
-        local user_num="$MENU_CHOICE"
-        if [[ "$user_num" =~ ^[0-9]+$ && "$user_num" -ge 1 && "$user_num" -le ${#users_list[@]} ]]; then
-            SELECTED_USER="${users_list[$((user_num-1))]}"
-            return 0
+        if [[ "$allow_create" == "create" ]]; then
+            if [[ "$(prompt_yes_no "Нет подходящих пользователей. Создать нового пользователя (sudo и docker)?" "no")" == "yes" ]]; then
+                new_user docker
+            fi
+        else
+            red "Нет подходящих пользователей."
         fi
-        red "Некорректный выбор. Введите число от 1 до ${#users_list[@]}"
-    done
-}
-
-
-
-# Выбор пользователя для SSH-ключей
-select_user_for_ssh_keys() {
-    local users_list=()
-    mapfile -t users_list < <(get_non_system_users)
-    local user_labels=()
-    local user_values=()
-    local manual_user=""
-    
-    if [[ ${#users_list[@]} -eq 0 ]]; then
-        red "Нет подходящих пользователей."
-        SELECTED_USER=""
         return 1
     fi
-    
+
     for i in "${!users_list[@]}"; do
         user_labels+=("$((i+1)). ${users_list[$i]}")
         user_values+=("$((i+1))")
     done
-    user_labels+=("$(( ${#users_list[@]} + 1 )). Ввести имя пользователя вручную")
-    user_values+=("$(( ${#users_list[@]} + 1 ))")
-    
+
+    extra_index=$(( ${#users_list[@]} + 1 ))
+    if [[ "$allow_manual" == "manual" ]]; then
+        manual_index=$extra_index
+        user_labels+=("$extra_index. Ввести имя пользователя вручную")
+        user_values+=("$extra_index")
+        extra_index=$((extra_index + 1))
+    fi
+    if [[ "$allow_create" == "create" ]]; then
+        create_index=$extra_index
+        user_labels+=("$extra_index. Создать нового пользователя")
+        user_values+=("$extra_index")
+    fi
+
     while true; do
         select_menu "Список доступных пользователей:" user_labels user_values
-        local user_num="$MENU_CHOICE"
+        user_num="$MENU_CHOICE"
         if [[ "$user_num" =~ ^[0-9]+$ ]]; then
             if [[ "$user_num" -ge 1 && "$user_num" -le ${#users_list[@]} ]]; then
                 SELECTED_USER="${users_list[$((user_num-1))]}"
                 return 0
-            elif [[ "$user_num" -eq $(( ${#users_list[@]} + 1 )) ]]; then
+            elif [[ "$allow_manual" == "manual" && "$user_num" -eq "$manual_index" ]]; then
                 read -r -p "Введите имя пользователя: " manual_user
                 if [[ -z "$manual_user" ]]; then
                     red "Имя пользователя не указано."
@@ -832,9 +819,16 @@ select_user_for_ssh_keys() {
                 fi
                 SELECTED_USER="$manual_user"
                 return 0
+            elif [[ "$allow_create" == "create" && "$user_num" -eq "$create_index" ]]; then
+                new_user docker
+                if id "$username" &>/dev/null; then
+                    SELECTED_USER="$username"
+                    return 0
+                fi
+                return 1
             fi
         fi
-        red "Некорректный выбор. Введите число от 1 до $(( ${#users_list[@]} + 1 ))"
+        red "Некорректный выбор."
     done
 }
 
@@ -862,6 +856,7 @@ users_menu() {
             "0. Назад"
         )
         local user_menu_values=(1 2 3 4 5 6 7 8 0)
+        local USER_MENU TARGET_GROUP
         
         select_menu "Подменю управления пользователями" user_menu_labels user_menu_values
         USER_MENU="$MENU_CHOICE"
@@ -977,13 +972,13 @@ validate_and_restart_sshd() {
         return 0
     fi
 
-    red "Ошибка: не удалось перезапустить службу sshd (ssh/ssh)."
+    red "Ошибка: не удалось перезапустить службу sshd (ssh/sshd)."
     red "Внимание: текущая SSH-сессия может быть затронута. Проверьте статус службы вручную."
     return 1
 }
 
 setup_ssh_keys() {
-    if ! select_user_for_ssh_keys; then
+    if ! select_non_system_user manual; then
         return
     fi
     username="$SELECTED_USER"
@@ -1010,6 +1005,10 @@ setup_ssh_keys() {
     read -r -p "Если выполнили все действия до номера 5 включительно, нажмите ENTER: "
     
     # Открытие файла authorized_keys для редактирования
+    if ! command -v nano &>/dev/null; then
+        red "nano не установлен. Установите его: apt install nano"
+        return
+    fi
     ${USE_SUDO:+$USE_SUDO }nano "/home/$username/.ssh/authorized_keys"
     
     # Установка прав доступа
@@ -1116,8 +1115,11 @@ disable_ping() {
 
 # Отключение/включение входа root по SSH
 disable_root_ssh() {
-    # Определяем текущее значение PermitRootLogin (берем последнее в файле)
-    ROOT_SSH_STATUS=$(grep -i '^\s*PermitRootLogin' /etc/ssh/sshd_config 2>/dev/null | tail -n 1 | awk '{print $2}')
+    # Определяем текущее значение PermitRootLogin (учитывает Include sshd_config.d)
+    ROOT_SSH_STATUS=$(sshd -T 2>/dev/null | awk '/^permitrootlogin/ {print $2; exit}')
+    if [[ -z "$ROOT_SSH_STATUS" ]]; then
+        ROOT_SSH_STATUS=$(grep -i '^\s*PermitRootLogin' /etc/ssh/sshd_config 2>/dev/null | tail -n 1 | awk '{print $2}')
+    fi
     
     # Если параметра нет — считаем, что включен по умолчанию (prohibit-password/yes)
     if [[ -z "$ROOT_SSH_STATUS" ]]; then
@@ -1152,6 +1154,7 @@ disable_root_ssh() {
 
 # Изменение порта SSH
 change_port_ssh() {
+    local NEW_SSH_PORT
     CURRENT_SSH_PORT=$(get_ssh_port)
     
     if [[ "$(prompt_yes_no "Порт SSH = $CURRENT_SSH_PORT, хотите изменить его?" "no")" == "no" ]]; then
@@ -1329,6 +1332,7 @@ ufw_menu() {
         
         select_menu "Подменю управления Firewall UFW" ufw_menu_labels ufw_menu_values
         local UFW_MENU="$MENU_CHOICE"
+        local UFW_TCP_PORTS UFW_UDP_PORTS
         
         case $UFW_MENU in
             1)
@@ -1397,6 +1401,7 @@ ufw_menu() {
                     UFW_DEL_VALUES+=("$UFW_RULE")
                 done
                 select_menu "Выберите порт для удаления:" UFW_DEL_LABELS UFW_DEL_VALUES
+                [[ -z "$MENU_CHOICE" ]] && continue
                 local UFW_DEL_PORT="${MENU_CHOICE%%/*}"
                 local UFW_DEL_PROTO="${MENU_CHOICE##*/}"
                 if echo "y" | ${USE_SUDO:+$USE_SUDO }ufw delete allow "$UFW_DEL_PORT/$UFW_DEL_PROTO" >/dev/null 2>&1; then
@@ -1551,6 +1556,7 @@ EOF
 
 # Выбор jail для Fail2ban
 select_fail2ban_jail() {
+    local fb_all jail_list_line
     # Проверка прав
     if [[ $EUID -ne 0 && -z "$USE_SUDO" ]]; then
         red "Нужны права root для работы с Fail2ban."
@@ -2061,48 +2067,6 @@ add_user_to_docker() {
     fi
 }
 
-# Выбор существующего пользователя для добавления в группу docker
-select_existing_user() {
-    # Получаем список несистемных пользователей (UID >= 1000), исключая ubuntu
-    local users_list=()
-    mapfile -t users_list < <(getent passwd | awk -F: '$3 >= 1000 && $3 < 65534 && $1 != "ubuntu" {print $1}' | grep -vE '(nologin|false|sync|halt|shutdown)')
-    local user_labels=()
-    local user_values=()
-    
-    if [[ ${#users_list[@]} -eq 0 ]]; then
-        red "Нет подходящих пользователей для добавления в группу docker."
-        if [[ "$(prompt_yes_no "Создать нового пользователя и добавить в группы sudo и docker?" "no")" == "yes" ]]; then
-            new_user docker
-        fi
-        return 1
-    fi
-    
-    for i in "${!users_list[@]}"; do
-        user_labels+=("$((i+1)). ${users_list[$i]}")
-        user_values+=("$((i+1))")
-    done
-    user_labels+=("$(( ${#users_list[@]} + 1 )). Создать нового пользователя")
-    user_values+=("$(( ${#users_list[@]} + 1 ))")
-    
-    while true; do
-        select_menu "Список доступных пользователей:" user_labels user_values
-        local user_num="$MENU_CHOICE"
-        
-        if [[ "$user_num" =~ ^[0-9]+$ ]]; then
-            if [[ "$user_num" -ge 1 ]] && [[ "$user_num" -le ${#users_list[@]} ]]; then
-                local selected_user="${users_list[$((user_num-1))]}"
-                add_user_to_docker "$selected_user"
-                return $?
-            elif [[ "$user_num" -eq $(( ${#users_list[@]} + 1 )) ]]; then
-                new_user docker
-                return $?
-            fi
-        fi
-        
-        red "Некорректный выбор. Введите число от 1 до $(( ${#users_list[@]} + 1 ))"
-    done
-}
-
 # Установка Docker
 install_docker() {
 
@@ -2122,7 +2086,7 @@ install_docker() {
             yellow "Внимание: нет пользователей в группе docker."
             
             if [[ "$(prompt_yes_no "Добавить существующего пользователя в группу docker?" "no")" == "yes" ]]; then
-                select_existing_user
+                select_non_system_user "" create && [[ -n "$SELECTED_USER" ]] && add_user_to_docker "$SELECTED_USER"
             elif [[ "$(prompt_yes_no "Создать нового пользователя и добавить в группы sudo и docker?" "no")" == "yes" ]]; then
                 new_user docker
             fi
@@ -2182,7 +2146,7 @@ install_docker() {
         if ! check_docker_users; then
             yellow "Внимание: Docker установлен, но нет пользователей в группе docker."
             if [[ "$(prompt_yes_no "Добавить существующего пользователя в группу docker?" "no")" == "yes" ]]; then
-                select_existing_user
+                select_non_system_user "" create && [[ -n "$SELECTED_USER" ]] && add_user_to_docker "$SELECTED_USER"
             elif [[ "$(prompt_yes_no "Создать нового пользователя и добавить в группы sudo и docker?" "no")" == "yes" ]]; then
                 new_user docker
             fi
@@ -2341,9 +2305,6 @@ show_help() {
     echo "11. Docker — подменю управления: установка, обновление, чистка и контейнеры. Возможные проблемы: остановка сервисов, удаление данных контейнеров."
     echo "12. Справка — показывает это описание."
     echo " "
-    if [[ "$DOCKER_MENU_VERSION" != "$DOCKER_HELP_VERSION" ]]; then
-        yellow "ВНИМАНИЕ: справка Docker может не соответствовать меню."
-    fi
     green "Справка по Docker‑подменю:"
     echo "1. Установить Docker — устанавливает Docker. Возможные проблемы: конфликт пакетов/репозиториев."
     echo "2. Обновить Docker — обновляет docker-ce/cli/containerd. Возможные проблемы: перезапуск сервисов."
@@ -2393,7 +2354,7 @@ main() {
         local main_menu_values=(1 2 3 4 5 6 7 8 9 10 11 12 0)
         
         select_menu "Основное меню | protection v${PROTECTION_VERSION}" main_menu_labels main_menu_values
-        NUMBER="$MENU_CHOICE"
+        local NUMBER="$MENU_CHOICE"
         
         case $NUMBER in
             0)

@@ -15,7 +15,7 @@ CURRENT_SSH_PORT=""
 username=""
 password=""
 USE_SUDO=""
-PROTECTION_VERSION="1.2.0"
+PROTECTION_VERSION="1.2.1"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 
 # ============================================================
@@ -1059,7 +1059,7 @@ create_user() {
     
     yellow "Проверяем какие права имеет пользователь $username"
     if [[ -n "$USE_SUDO" ]]; then
-        ${USE_SUDO:+$USE_SUDO }sudo -l -U "$username" 2>/dev/null
+        sudo -l -U "$username" 2>/dev/null
         green "Если вы видите такую надпись (ALL : ALL) ALL то все нормально"
     fi
     
@@ -1216,7 +1216,7 @@ setup_ufw() {
 
     # Устанавливаем ufw, если не установлен
     if ! dpkg-query -W -f='${Status}' ufw 2>/dev/null | grep -q "install ok installed"; then
-        apt install -yq ufw
+        apt update -y && apt install -yq ufw
     fi
     
     local CHECK_UFW=$(${USE_SUDO:+$USE_SUDO }ufw status 2>/dev/null)
@@ -1421,7 +1421,7 @@ ufw_menu() {
                 CURRENT_SSH_PORT=$(get_ssh_port)
                 if ! validate_port "$CURRENT_SSH_PORT" 1 65535; then
                     red "SSH порт из конфигурации некорректен: $CURRENT_SSH_PORT"
-                    break
+                    continue
                 fi
                 if ! ufw_rule_exists "$CURRENT_SSH_PORT/tcp"; then
                     if [[ "$(prompt_yes_no "SSH порт $CURRENT_SSH_PORT/tcp не разрешен. Добавить?" "no")" == "yes" ]]; then
@@ -1463,6 +1463,8 @@ install_fail2ban() {
             return
         fi
     fi
+
+    apt update -y
 
     # Устанавливаем nftables, если не установлен
     if ! command -v nft &>/dev/null; then
@@ -1509,9 +1511,9 @@ maxretry = $F2B_MAXRETRY_DEFAULT
 # Разрешённые IP (добавьте свои после 127.0.0.1 через пробел)
 ignoreip = 127.0.0.1/8 ::1
 
-# Действие по умолчанию — iptables
-banaction = iptables-multiport
-banaction_allports = iptables-allports
+# Действие по умолчанию — nftables
+banaction = nftables-multiport
+banaction_allports = nftables-allports
 backend = systemd
 
 [sshd]
@@ -1523,7 +1525,6 @@ backend = polling
 maxretry = 3
 findtime = $F2B_FINDTIME_DEFAULT
 bantime = $F2B_SSHD_BANTIME
-banaction = iptables-multiport
 
 [recidive]
 enabled = true
@@ -1534,7 +1535,7 @@ backend  = polling
 bantime = $F2B_RECIDIVE_BANTIME
 findtime = $F2B_RECIDIVE_FINDTIME
 maxretry = $F2B_RECIDIVE_MAXRETRY
-action = iptables-allports[name=recidive]
+action = nftables-allports[name=recidive]
 EOF
     
     ${USE_SUDO:+$USE_SUDO }systemctl enable fail2ban

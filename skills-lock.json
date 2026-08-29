@@ -19,11 +19,23 @@
       "skillPath": "skills/bash-linux/SKILL.md",
       "computedHash": "e18a0aff172b4a8189b2d105021a63beff64678c7241944312cff3b1ca867c2d"
     },
-    "bash-scripting": {
-      "source": "sickn33/antigravity-awesome-skills",
+    "find-skills": {
+      "source": "vercel-labs/skills",
       "sourceType": "github",
-      "skillPath": "skills/bash-scripting/SKILL.md",
-      "computedHash": "84d9922ee4689a39ecee13dc9193cf425893aea9137cf0979f8d29960e69ce18"
+      "skillPath": "skills/find-skills/SKILL.md",
+      "computedHash": "deddc03b4b5f50755b97fcdb737a786676992ef7e9be614d2cd2c71e0320bebf"
+    },
+    "github-actions-docs": {
+      "source": "local",
+      "sourceType": "local",
+      "skillPath": ".agents/skills/github-actions-docs/SKILL.md",
+      "computedHash": "b06bc480f7608c43896f85257bc61b1de6d48f005468b734713155b849daed6a"
+    },
+    "karpathy-guidelines": {
+      "source": "local",
+      "sourceType": "local",
+      "skillPath": ".agents/skills/karpathy-guidelines/SKILL.md",
+      "computedHash": "6e22cc54cb02a5e98ae42d06d9d7292db0c1b43894831b32879beb0166b2aea7"
     }
   }
 }

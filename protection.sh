@@ -15,7 +15,7 @@ CURRENT_SSH_PORT=""
 username=""
 password=""
 USE_SUDO=""
-PROTECTION_VERSION="1.2.1"
+PROTECTION_VERSION="1.2.2"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 
 # ============================================================
@@ -547,20 +547,20 @@ validate_password() {
         return 1
     fi
     
-    # Наличие строчных букв
-    if ! [[ "$password" =~ [a-zа-яё] ]]; then
+    # Наличие строчных букв (POSIX-классы не зависят от локали, в отличие от [a-zа-яё])
+    if ! [[ "$password" =~ [[:lower:]] ]]; then
         red "Пароль должен содержать хотя бы одну букву нижнего регистра."
         return 1
     fi
 
     # Наличие заглавных букв
-    if ! [[ "$password" =~ [A-ZА-ЯЁ] ]]; then
+    if ! [[ "$password" =~ [[:upper:]] ]]; then
         red "Пароль должен содержать хотя бы одну букву верхнего регистра."
         return 1
     fi
 
     # Наличие цифр
-    if ! [[ "$password" =~ [0-9] ]]; then
+    if ! [[ "$password" =~ [[:digit:]] ]]; then
         red "Пароль должен содержать хотя бы одну цифру."
         return 1
     fi

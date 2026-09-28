@@ -15,7 +15,7 @@ CURRENT_SSH_PORT=""
 username=""
 password=""
 USE_SUDO=""
-PROTECTION_VERSION="1.2.2"
+PROTECTION_VERSION="1.2.3"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 
 # ============================================================
@@ -694,6 +694,55 @@ prompt_yes_no() {
 }
 
 # ============================================================
+# SYSCTL ДРОП-ИН
+# ============================================================
+
+# Запись ключей в /etc/sysctl.d/99-protection.conf (с бекапом), удаление
+# легаси-записей этих ключей из /etc/sysctl.conf и точечное применение.
+# Аргументы: пары "ключ=значение". Возвращает 0, если все ключи применились.
+apply_sysctl_keys() {
+    local dropin="/etc/sysctl.d/99-protection.conf"
+    local pair key esc failed=0
+
+    if [[ -f "$dropin" ]]; then
+        cp "$dropin" "$dropin.bak" || { red "Не удалось создать резервную копию $dropin."; return 1; }
+    fi
+
+    {
+        echo "# Файл управляется скриптом protection"
+        for pair in "$@"; do
+            echo "$pair"
+        done
+    } > "$dropin" || { red "Не удалось записать $dropin."; return 1; }
+    chmod 644 "$dropin" 2>/dev/null
+
+    # Легаси-записи в /etc/sysctl.conf применяются при загрузке после дроп-ина,
+    # поэтому их нужно убрать, иначе они перебьют наш файл
+    if [[ -f /etc/sysctl.conf ]]; then
+        for pair in "$@"; do
+            key="${pair%%=*}"
+            esc=$(printf '%s' "$key" | sed 's/\./\\./g')
+            if grep -qE "^[[:space:]]*${esc}[[:space:]]*=" /etc/sysctl.conf 2>/dev/null; then
+                cp /etc/sysctl.conf /etc/sysctl.conf.bak || { red "Не удалось создать резервную копию sysctl.conf."; return 1; }
+                break
+            fi
+        done
+        for pair in "$@"; do
+            key="${pair%%=*}"
+            esc=$(printf '%s' "$key" | sed 's/\./\\./g')
+            sed -i -E "/^[[:space:]]*${esc}[[:space:]]*=/d" /etc/sysctl.conf 2>/dev/null
+        done
+    fi
+
+    for pair in "$@"; do
+        if ! sysctl -w "$pair" >/dev/null 2>&1; then
+            failed=1
+        fi
+    done
+    return "$failed"
+}
+
+# ============================================================
 # НАСТРОЙКА IPv6
 # ============================================================
 
@@ -710,12 +759,14 @@ disable_ipv6() {
         green "IPv6 уже отключен во всех интерфейсах."
         
         if [[ "$(prompt_yes_no "Хотите включить IPv6?" "no")" == "yes" ]]; then
-            cp /etc/sysctl.conf /etc/sysctl.conf.bak || { red "Не удалось создать резервную копию sysctl.conf."; return 1; }
-            sed -i '/^[[:space:]]*net.ipv6.conf.all.disable_ipv6/d' /etc/sysctl.conf
-            sed -i '/^[[:space:]]*net.ipv6.conf.default.disable_ipv6/d' /etc/sysctl.conf
-            sed -i '/^[[:space:]]*net.ipv6.conf.lo.disable_ipv6/d' /etc/sysctl.conf
-            sysctl -p >/dev/null 2>&1
-            purple "IPv6 успешно включен."
+            if apply_sysctl_keys \
+                "net.ipv6.conf.all.disable_ipv6=0" \
+                "net.ipv6.conf.default.disable_ipv6=0" \
+                "net.ipv6.conf.lo.disable_ipv6=0"; then
+                purple "IPv6 успешно включен."
+            else
+                red "Ошибка применения sysctl. Проверьте /etc/sysctl.d/99-protection.conf."
+            fi
         fi
         return
     fi
@@ -725,16 +776,13 @@ disable_ipv6() {
         return
     fi
     
-    # Добавляем параметры отключения IPv6 в sysctl.conf
-    cp /etc/sysctl.conf /etc/sysctl.conf.bak || { red "Не удалось создать резервную копию sysctl.conf."; return 1; }
-    tee -a /etc/sysctl.conf > /dev/null <<EOF
-net.ipv6.conf.all.disable_ipv6 = 1
-net.ipv6.conf.default.disable_ipv6 = 1
-net.ipv6.conf.lo.disable_ipv6 = 1
-EOF
-    
-    # Применяем изменения
-    sysctl -p >/dev/null 2>&1
+    # Записываем параметры отключения IPv6 в дроп-ин
+    if ! apply_sysctl_keys \
+        "net.ipv6.conf.all.disable_ipv6=1" \
+        "net.ipv6.conf.default.disable_ipv6=1" \
+        "net.ipv6.conf.lo.disable_ipv6=1"; then
+        red "Ошибка применения sysctl. Проверьте /etc/sysctl.d/99-protection.conf."
+    fi
     
     # Проверяем, что IPv6 отключен
     local ipv6_all ipv6_default ipv6_lo
@@ -1072,38 +1120,23 @@ create_user() {
 
 # Функция для отключения/включения ICMP ping
 disable_ping() {
-    if grep -qE '^[[:space:]]*net.ipv4.icmp_echo_ignore_all' /etc/sysctl.conf; then
-        PING_STATUS=$(grep -E '^[[:space:]]*net.ipv4.icmp_echo_ignore_all' /etc/sysctl.conf | tail -n 1 | awk -F'=' '{gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2}')
+    # Фактическое значение ядра (учитывает и sysctl.conf, и дроп-ины)
+    PING_STATUS=$(sysctl -n net.ipv4.icmp_echo_ignore_all 2>/dev/null)
 
-        if [[ "$PING_STATUS" == "0" ]]; then
-            if [[ "$(prompt_yes_no "Доступ к команде ping включен. Хотите отключить доступ к команде ping?" "no")" == "yes" ]]; then
-                cp /etc/sysctl.conf /etc/sysctl.conf.bak || { red "Не удалось создать резервную копию sysctl.conf."; return 1; }
-                sed -i 's/net.ipv4.icmp_echo_ignore_all .*/net.ipv4.icmp_echo_ignore_all = 1/' /etc/sysctl.conf
-                if sysctl -p >/dev/null 2>&1; then
-                    purple "Доступ к команде ping отключен."
-                else
-                    red "Ошибка применения sysctl. Резервная копия: sysctl.conf.bak."
-                fi
-            fi
-        else
-            if [[ "$(prompt_yes_no "Хотите включить доступ к команде ping?" "no")" == "yes" ]]; then
-                cp /etc/sysctl.conf /etc/sysctl.conf.bak || { red "Не удалось создать резервную копию sysctl.conf."; return 1; }
-                sed -i 's/net.ipv4.icmp_echo_ignore_all .*/net.ipv4.icmp_echo_ignore_all = 0/' /etc/sysctl.conf
-                if sysctl -p >/dev/null 2>&1; then
-                    purple "Доступ к команде ping включен."
-                else
-                    red "Ошибка применения sysctl. Резервная копия: sysctl.conf.bak."
-                fi
+    if [[ "$PING_STATUS" == "1" ]]; then
+        if [[ "$(prompt_yes_no "Доступ к команде ping отключен. Хотите включить?" "no")" == "yes" ]]; then
+            if apply_sysctl_keys "net.ipv4.icmp_echo_ignore_all=0"; then
+                purple "Доступ к команде ping включен."
+            else
+                red "Ошибка применения sysctl. Проверьте /etc/sysctl.d/99-protection.conf."
             fi
         fi
     else
         if [[ "$(prompt_yes_no "Хотите отключить доступ к команде ping?" "no")" == "yes" ]]; then
-            cp /etc/sysctl.conf /etc/sysctl.conf.bak || { red "Не удалось создать резервную копию sysctl.conf."; return 1; }
-            echo 'net.ipv4.icmp_echo_ignore_all = 1' | tee -a /etc/sysctl.conf >/dev/null
-            if sysctl -p >/dev/null 2>&1; then
+            if apply_sysctl_keys "net.ipv4.icmp_echo_ignore_all=1"; then
                 purple "Доступ к команде ping отключен."
             else
-                red "Ошибка применения sysctl. Проверьте /etc/sysctl.conf (резервная копия: sysctl.conf.bak)."
+                red "Ошибка применения sysctl. Проверьте /etc/sysctl.d/99-protection.conf."
             fi
         fi
     fi
@@ -1112,6 +1145,21 @@ disable_ping() {
 # ============================================================
 # НАСТРОЙКА SSH
 # ============================================================
+
+# Установка значения PermitRootLogin (с бекапом и рестартом sshd)
+set_permit_root_login() {
+    local value=$1
+    cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak || { red "Не удалось создать резервную копию sshd_config."; return 1; }
+    if grep -qi '^\s*PermitRootLogin' /etc/ssh/sshd_config; then
+        sed -i "s/^\s*PermitRootLogin.*/PermitRootLogin $value/I" /etc/ssh/sshd_config
+    else
+        echo "PermitRootLogin $value" | tee -a /etc/ssh/sshd_config >/dev/null
+    fi
+    if ! validate_and_restart_sshd; then
+        red "Не удалось применить PermitRootLogin $value."
+        return 1
+    fi
+}
 
 # Отключение/включение входа root по SSH
 disable_root_ssh() {
@@ -1128,25 +1176,26 @@ disable_root_ssh() {
     
     if [[ "$ROOT_SSH_STATUS" == "no" ]]; then
         if [[ "$(prompt_yes_no "Вход root по SSH отключен. Хотите включить вход root по SSH?" "no")" == "yes" ]]; then
-            cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak || { red "Не удалось создать резервную копию sshd_config."; return 1; }
-            if grep -qi '^\s*PermitRootLogin' /etc/ssh/sshd_config; then
-                sed -i 's/^\s*PermitRootLogin.*/PermitRootLogin yes/I' /etc/ssh/sshd_config
-            else
-                echo "PermitRootLogin yes" | tee -a /etc/ssh/sshd_config >/dev/null
+            if set_permit_root_login yes; then
+                purple "Вход root по SSH включен."
             fi
-            validate_and_restart_sshd
-            purple "Вход root по SSH включен."
+        fi
+    elif [[ "$ROOT_SSH_STATUS" == "prohibit-password" ]]; then
+        yellow "Вход root по SSH разрешен только по ключам (вход по паролю отключен)."
+        if [[ "$(prompt_yes_no "Полностью отключить вход root по SSH?" "no")" == "yes" ]]; then
+            if set_permit_root_login no; then
+                purple "Вход root по SSH отключен."
+            fi
+        elif [[ "$(prompt_yes_no "Полностью включить вход root по SSH (разрешить вход по паролю)?" "no")" == "yes" ]]; then
+            if set_permit_root_login yes; then
+                purple "Вход root по SSH включен."
+            fi
         fi
     else
         if [[ "$(prompt_yes_no "Хотите отключить вход root по SSH?" "no")" == "yes" ]]; then
-            cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak || { red "Не удалось создать резервную копию sshd_config."; return 1; }
-            if grep -qi '^\s*PermitRootLogin' /etc/ssh/sshd_config; then
-                sed -i 's/^\s*PermitRootLogin.*/PermitRootLogin no/I' /etc/ssh/sshd_config
-            else
-                echo "PermitRootLogin no" | tee -a /etc/ssh/sshd_config >/dev/null
+            if set_permit_root_login no; then
+                purple "Вход root по SSH отключен."
             fi
-            validate_and_restart_sshd
-            purple "Вход root по SSH отключен."
         fi
     fi
 }

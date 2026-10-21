@@ -15,7 +15,7 @@ CURRENT_SSH_PORT=""
 username=""
 password=""
 USE_SUDO=""
-PROTECTION_VERSION="1.2.3"
+PROTECTION_VERSION="1.2.4"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 
 # ============================================================
@@ -746,8 +746,75 @@ apply_sysctl_keys() {
 # НАСТРОЙКА IPv6
 # ============================================================
 
+# Проверка и загрузка модуля ядра ipv6.
+# Возвращает 0, если модуль ipv6 доступен (уже загружен или загружен сейчас), иначе 1.
+ensure_ipv6_module() {
+    # Модуль уже активен (создан каталог в /sys/module или присутствуют ключи sysctl)
+    if [[ -d /sys/module/ipv6 || -d /proc/sys/net/ipv6 ]]; then
+        return 0
+    fi
+
+    # modprobe отсутствует — устанавливаем пакет kmod
+    if ! command -v modprobe &>/dev/null; then
+        if ! check_internet; then
+            red "Нет подключения к интернету."
+            if [[ "$(prompt_yes_no "Продолжить без подключения?" "no")" == "no" ]]; then
+                return 1
+            fi
+        fi
+        green "Устанавливаем kmod (modprobe)..."
+        if apt update -y && apt install -yq kmod; then
+            if command -v modprobe &>/dev/null; then
+                purple "kmod успешно установлен."
+            else
+                red "kmod установлен, но modprobe недоступен в PATH."
+                return 1
+            fi
+        else
+            red "Ошибка при установке kmod (apt update/install завершился с ошибкой)."
+            return 1
+        fi
+    fi
+
+    # Пытаемся загрузить модуль ipv6
+    green "Модуль IPv6 не загружен. Загружаем..."
+    if ${USE_SUDO:+$USE_SUDO }modprobe ipv6 && [[ -d /sys/module/ipv6 || -d /proc/sys/net/ipv6 ]]; then
+        purple "Модуль IPv6 успешно загружен."
+        return 0
+    fi
+
+    # Не удалось — проверяем, не заблокирован ли модуль в /etc/modprobe.d (blacklist / alias off)
+    local blocked_files bf
+    blocked_files=$(grep -Eils '^[[:space:]]*(blacklist[[:space:]]+ipv6([[:space:]]|$)|alias[[:space:]]+net-pf-10[[:space:]]+off)' /etc/modprobe.d/*.conf 2>/dev/null)
+
+    if [[ -n "$blocked_files" ]]; then
+        yellow "Модуль IPv6 заблокирован в конфигурации modprobe:"
+        echo "$blocked_files"
+        if [[ "$(prompt_yes_no "Закомментировать блокирующие записи (будут созданы резервные копии) и повторить загрузку?" "no")" == "yes" ]]; then
+            while IFS= read -r bf; do
+                [[ -n "$bf" ]] || continue
+                cp "$bf" "$bf.bak" 2>/dev/null
+                sed -i -E 's/^([[:space:]]*blacklist[[:space:]]+ipv6([[:space:]]|$))/## protection: \1/; s/^([[:space:]]*alias[[:space:]]+net-pf-10[[:space:]]+off)/## protection: \1/' "$bf" 2>/dev/null
+            done <<< "$blocked_files"
+            if ${USE_SUDO:+$USE_SUDO }modprobe ipv6 && [[ -d /sys/module/ipv6 || -d /proc/sys/net/ipv6 ]]; then
+                purple "Модуль IPv6 успешно загружен."
+                return 0
+            fi
+        fi
+    fi
+
+    red "Не удалось загрузить модуль IPv6. Проверьте вручную: modprobe ipv6, /etc/modprobe.d и параметры ядра (ipv6.disable=1)."
+    return 1
+}
+
 # Функция для отключения/включения IPv6
 disable_ipv6() {
+    # Без модуля ipv6 sysctl-ключи недоступны — включение/отключение IPv6 не работает
+    if ! ensure_ipv6_module; then
+        red "Модуль IPv6 не установлен/не загружен. Включение/отключение IPv6 невозможно."
+        return 1
+    fi
+
     # Проверяем текущий статус IPv6
     IPV6_STATUS_ALL=$(sysctl net.ipv6.conf.all.disable_ipv6 2>/dev/null | awk '{print $3}')
     IPV6_STATUS_DEFAULT=$(sysctl net.ipv6.conf.default.disable_ipv6 2>/dev/null | awk '{print $3}')
@@ -2344,7 +2411,7 @@ show_help() {
     yellow "Рекомендуется: заранее открыть порт в UFW и проверить доступ."
     echo "4. Пользователи — управление пользователями и группами. Возможные проблемы: удаление пользователя с home удалит данные."
     echo "5. Отключить/включить PING — меняет sysctl. Возможные проблемы: диагностика сети затруднится."
-    echo "6. Отключить/включить IPv6 — меняет sysctl. Возможные проблемы: сервисы/туннели могут перестать работать."
+    echo "6. Отключить/включить IPv6 — меняет sysctl, автоматически проверяет и при необходимости устанавливает/загружает модуль ядра ipv6. Возможные проблемы: сервисы/туннели могут перестать работать."
     echo "7. Настроить SSH ключи — добавляет ключ в authorized_keys пользователя. Возможные проблемы: ошибка доступа при неверных правах."
     echo "8. Fail2ban — защита от брутфорса, управление jail. Возможные проблемы: можно заблокировать себя при ошибках."
     yellow "Рекомендуется: добавить свой IP в ignoreip."

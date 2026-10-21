@@ -15,7 +15,7 @@ CURRENT_SSH_PORT=""
 username=""
 password=""
 USE_SUDO=""
-PROTECTION_VERSION="1.2.4"
+PROTECTION_VERSION="1.2.5"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 
 # ============================================================
@@ -746,13 +746,43 @@ apply_sysctl_keys() {
 # НАСТРОЙКА IPv6
 # ============================================================
 
-# Проверка и загрузка модуля ядра ipv6.
-# Возвращает 0, если модуль ipv6 доступен (уже загружен или загружен сейчас), иначе 1.
-ensure_ipv6_module() {
-    # Модуль уже активен (создан каталог в /sys/module или присутствуют ключи sysctl)
-    if [[ -d /sys/module/ipv6 || -d /proc/sys/net/ipv6 ]]; then
+# Фактическая проверка доступности IPv6-стека: ключи sysctl существуют и читаются.
+ipv6_stack_available() {
+    [[ -r /proc/sys/net/ipv6/conf/all/disable_ipv6 ]]
+}
+
+# Добавление модуля ipv6 в автозагрузку (systemd-modules-load), чтобы модуль
+# загружался при старте системы до применения sysctl-дроп-инов.
+ensure_ipv6_module_autoload() {
+    local autoload_conf="/etc/modules-load.d/protection-ipv6.conf"
+
+    if [[ -f "$autoload_conf" ]] && grep -qxE 'ipv6' "$autoload_conf" 2>/dev/null; then
         return 0
     fi
+    if mkdir -p /etc/modules-load.d 2>/dev/null && echo "ipv6" > "$autoload_conf" 2>/dev/null; then
+        purple "Модуль ipv6 добавлен в автозагрузку: $autoload_conf"
+    else
+        yellow "Не удалось добавить модуль ipv6 в автозагрузку ($autoload_conf)."
+    fi
+}
+
+# Проверка и загрузка модуля ядра ipv6.
+# Возвращает 0, если IPv6-стек доступен (sysctl-ключи существуют), иначе 1.
+ensure_ipv6_module() {
+    # IPv6-стек уже активен — sysctl-ключи существуют, включение/отключение будет работать
+    if ipv6_stack_available; then
+        return 0
+    fi
+
+    # Ядро загружено с ipv6.disable=1 — модуль не поможет, нужны правки параметров загрузки
+    if grep -q 'ipv6.disable=1' /proc/cmdline 2>/dev/null; then
+        red "Ядро загружено с параметром ipv6.disable=1 (/proc/cmdline) — IPv6 отключен на уровне ядра."
+        red "Удалите ipv6.disable=1 из параметров загрузки (GRUB) и перезагрузите сервер."
+        return 1
+    fi
+
+    # modprobe может отсутствовать в PATH при нестандартном окружении — добавляем стандартные пути
+    export PATH="$PATH:/usr/sbin:/sbin"
 
     # modprobe отсутствует — устанавливаем пакет kmod
     if ! command -v modprobe &>/dev/null; then
@@ -776,16 +806,20 @@ ensure_ipv6_module() {
         fi
     fi
 
-    # Пытаемся загрузить модуль ipv6
+    # Пытаемся загрузить модуль ipv6 (явный modprobe работает даже при blacklist)
     green "Модуль IPv6 не загружен. Загружаем..."
-    if ${USE_SUDO:+$USE_SUDO }modprobe ipv6 && [[ -d /sys/module/ipv6 || -d /proc/sys/net/ipv6 ]]; then
+    local modprobe_err
+    modprobe_err=$(${USE_SUDO:+$USE_SUDO }modprobe ipv6 2>&1)
+    if ipv6_stack_available; then
         purple "Модуль IPv6 успешно загружен."
+        ensure_ipv6_module_autoload
         return 0
     fi
 
-    # Не удалось — проверяем, не заблокирован ли модуль в /etc/modprobe.d (blacklist / alias off)
+    # Не удалось — ищем блокировки в конфигурации modprobe (blacklist / alias off /
+    # options disable=1 / install-заглушка), включая /usr/lib/modprobe.d и /lib/modprobe.d
     local blocked_files bf
-    blocked_files=$(grep -Eils '^[[:space:]]*(blacklist[[:space:]]+ipv6([[:space:]]|$)|alias[[:space:]]+net-pf-10[[:space:]]+off)' /etc/modprobe.d/*.conf 2>/dev/null)
+    blocked_files=$(grep -Eils '^[[:space:]]*(blacklist[[:space:]]+ipv6([[:space:]]|$)|alias[[:space:]]+net-pf-10[[:space:]]+off([[:space:]]|$)|options[[:space:]]+ipv6[[:space:]]+disable=1|install[[:space:]]+ipv6[[:space:]]+/bin/(true|false))' /etc/modprobe.d/*.conf /usr/lib/modprobe.d/*.conf /lib/modprobe.d/*.conf 2>/dev/null | while IFS= read -r f; do readlink -f "$f" 2>/dev/null; done | sort -u)
 
     if [[ -n "$blocked_files" ]]; then
         yellow "Модуль IPv6 заблокирован в конфигурации modprobe:"
@@ -794,16 +828,19 @@ ensure_ipv6_module() {
             while IFS= read -r bf; do
                 [[ -n "$bf" ]] || continue
                 cp "$bf" "$bf.bak" 2>/dev/null
-                sed -i -E 's/^([[:space:]]*blacklist[[:space:]]+ipv6([[:space:]]|$))/## protection: \1/; s/^([[:space:]]*alias[[:space:]]+net-pf-10[[:space:]]+off)/## protection: \1/' "$bf" 2>/dev/null
+                sed -i -E 's@^[[:space:]]*(blacklist[[:space:]]+ipv6([[:space:]]|$)|alias[[:space:]]+net-pf-10[[:space:]]+off([[:space:]]|$)|options[[:space:]]+ipv6[[:space:]]+disable=1|install[[:space:]]+ipv6[[:space:]]+/bin/(true|false))@## protection: &@' "$bf" 2>/dev/null
             done <<< "$blocked_files"
-            if ${USE_SUDO:+$USE_SUDO }modprobe ipv6 && [[ -d /sys/module/ipv6 || -d /proc/sys/net/ipv6 ]]; then
+            ${USE_SUDO:+$USE_SUDO }modprobe ipv6 2>/dev/null
+            if ipv6_stack_available; then
                 purple "Модуль IPv6 успешно загружен."
+                ensure_ipv6_module_autoload
                 return 0
             fi
         fi
     fi
 
-    red "Не удалось загрузить модуль IPv6. Проверьте вручную: modprobe ipv6, /etc/modprobe.d и параметры ядра (ipv6.disable=1)."
+    red "Не удалось загрузить модуль IPv6: ${modprobe_err:-modprobe не дал вывода}."
+    red "Проверьте вручную: modprobe ipv6; lsmod | grep ipv6; конфигурацию /etc/modprobe.d; наличие модуля в /lib/modules/$(uname -r)."
     return 1
 }
 
@@ -830,6 +867,7 @@ disable_ipv6() {
                 "net.ipv6.conf.all.disable_ipv6=0" \
                 "net.ipv6.conf.default.disable_ipv6=0" \
                 "net.ipv6.conf.lo.disable_ipv6=0"; then
+                ensure_ipv6_module_autoload
                 purple "IPv6 успешно включен."
             else
                 red "Ошибка применения sysctl. Проверьте /etc/sysctl.d/99-protection.conf."
@@ -857,6 +895,7 @@ disable_ipv6() {
     ipv6_default=$(sysctl net.ipv6.conf.default.disable_ipv6 2>/dev/null | awk '{print $3}')
     ipv6_lo=$(sysctl net.ipv6.conf.lo.disable_ipv6 2>/dev/null | awk '{print $3}')
     if [[ "$ipv6_all" == "1" && "$ipv6_default" == "1" && "$ipv6_lo" == "1" ]]; then
+        ensure_ipv6_module_autoload
         purple "IPv6 успешно отключен во всех интерфейсах."
         green "Рекомендуется перезагрузить систему для полного применения изменений."
     else

@@ -15,7 +15,7 @@ CURRENT_SSH_PORT=""
 username=""
 password=""
 USE_SUDO=""
-PROTECTION_VERSION="1.3.1"
+PROTECTION_VERSION="1.3.2"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 
 # ============================================================
@@ -1847,11 +1847,14 @@ ufw_menu() {
                     fi
                 fi
                 ;;
+            10)
+                edit_fail2ban_jail_local
+                ;;
             0)
                 break
                 ;;
             *)
-                yellow "Введите число от 0 до 6 и нажмите ENTER"
+                yellow "Введите число от 0 до 10 и нажмите ENTER"
                 ;;
         esac
     done
@@ -2012,6 +2015,74 @@ select_fail2ban_jail() {
 
 
 
+# Редактирование /etc/fail2ban/jail.local в nano
+edit_fail2ban_jail_local() {
+    local jail_local="/etc/fail2ban/jail.local"
+    local jail_local_bak="${jail_local}.edit.bak"
+
+    if [[ ! -f "$jail_local" ]]; then
+        red "Файл $jail_local не найден. Сначала настройте fail2ban."
+        return 1
+    fi
+
+    # Устанавливаем nano, если он не установлен
+    if ! command -v nano &>/dev/null; then
+        if ! check_internet; then
+            red "Нет подключения к интернету."
+            if [[ "$(prompt_yes_no "Продолжить без подключения?" "no")" == "no" ]]; then
+                return 1
+            fi
+        fi
+        green "Устанавливаем nano..."
+        if ! apt update -y; then
+            red "Не удалось обновить индекс пакетов."
+            return 1
+        fi
+        if ! apt install -yq nano || ! command -v nano &>/dev/null; then
+            red "Не удалось установить nano."
+            return 1
+        fi
+        purple "nano успешно установлен."
+    fi
+
+    # Резервная копия перед редактированием
+    if ! cp "$jail_local" "$jail_local_bak"; then
+        red "Не удалось создать резервную копию jail.local."
+        return 1
+    fi
+
+    green "Редактирование $jail_local в nano. Сохранить: Ctrl+O, выход: Ctrl+X."
+    ${USE_SUDO:+$USE_SUDO }nano "$jail_local"
+
+    # Проверка конфигурации после редактирования
+    if ! ${USE_SUDO:+$USE_SUDO }fail2ban-client -t >/dev/null 2>&1; then
+        red "Конфигурация fail2ban не прошла проверку после редактирования."
+        if [[ "$(prompt_yes_no "Восстановить резервную копию jail.local?" "yes")" == "yes" ]]; then
+            if cp "$jail_local_bak" "$jail_local"; then
+                purple "jail.local восстановлен из резервной копии $jail_local_bak."
+            else
+                red "Не удалось восстановить jail.local из резервной копии $jail_local_bak."
+                return 1
+            fi
+        else
+            yellow "Оставляем отредактированный jail.local. Исправьте ошибки вручную."
+            return 1
+        fi
+    fi
+
+    # Перезапуск fail2ban для применения настроек, если служба активна
+    if systemctl is-active --quiet fail2ban 2>/dev/null; then
+        if ${USE_SUDO:+$USE_SUDO }systemctl restart fail2ban 2>/dev/null; then
+            purple "fail2ban перезапущен с новой конфигурацией."
+        else
+            red "Не удалось перезапустить fail2ban. Проверьте журнал: journalctl -u fail2ban"
+            return 1
+        fi
+    else
+        yellow "fail2ban не активен — изменения применятся при следующем запуске."
+    fi
+}
+
 # Подменю управления Fail2ban
 fail2ban_menu() {
     # Если fail2ban не установлен — выполняем стандартную установку/настройку
@@ -2031,10 +2102,11 @@ fail2ban_menu() {
             "7. Остановить Fail2ban"
             "8. Перезапустить Fail2ban"
             "9. Просмотр попыток подключения к серверу"
+            "10. Редактировать jail.local (nano)"
             "0. Назад"
         )
-        local fb_menu_values=(1 2 3 4 5 6 7 8 9 0)
-        
+        local fb_menu_values=(1 2 3 4 5 6 7 8 9 10 0)
+
         select_menu "Подменю управления Fail2ban" fb_menu_labels fb_menu_values
         local FB_MENU="$MENU_CHOICE"
         

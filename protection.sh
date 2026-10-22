@@ -15,7 +15,7 @@ CURRENT_SSH_PORT=""
 username=""
 password=""
 USE_SUDO=""
-PROTECTION_VERSION="1.2.6"
+PROTECTION_VERSION="1.3.0"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 
 # ============================================================
@@ -603,8 +603,12 @@ add_user_nopasswd() {
 # Удаление пользователя из sudoers (возврат требования пароля)
 remove_user_nopasswd() {
     local username=$1
-    rm -f "/etc/sudoers.d/$username"
-    purple "Пользователь $username исключен из группы для выполнения команд без пароля."
+    if rm -f "/etc/sudoers.d/$username"; then
+        purple "Пользователь $username исключен из группы для выполнения команд без пароля."
+    else
+        red "Не удалось удалить настройку NOPASSWD для пользователя $username."
+        return 1
+    fi
 }
 
 # Изменение пароля существующего пользователя
@@ -1012,7 +1016,7 @@ disable_ipv6() {
 
 # Получение списка несистемных пользователей
 get_non_system_users() {
-    getent passwd | awk -F: '$3 >= 1000 && $3 < 65534 && $1 != "ubuntu" {print $1}' | grep -vE '(nologin|false|sync|halt|shutdown)'
+    getent passwd | awk -F: '$3 >= 1000 && $3 < 65534 && $1 != "ubuntu" && $7 !~ /(nologin|false|sync|halt|shutdown)$/ {print $1}'
 }
 
 # Выбор несистемного пользователя. $1="manual" — добавить ручной ввод имени,
@@ -1232,6 +1236,29 @@ validate_and_restart_sshd() {
     return 1
 }
 
+# Проверка наличия другого рабочего способа входа по SSH с правами администратора.
+# Пароль учитывается только при явно разрешенной PasswordAuthentication.
+has_alternative_ssh_access() {
+    local user uid shell home password_auth status
+    password_auth=$(sshd -T 2>/dev/null | awk '/^passwordauthentication/ {print $2; exit}')
+
+    while IFS=: read -r user _ uid _ _ home shell; do
+        [[ "$uid" =~ ^[0-9]+$ && "$uid" -ge 1000 && "$uid" -lt 65534 ]] || continue
+        [[ "$shell" != */nologin && "$shell" != */false && -x "$shell" ]] || continue
+        id -nG "$user" 2>/dev/null | grep -Eq '(^| )(sudo|admin)( |$)' || continue
+
+        if [[ -s "$home/.ssh/authorized_keys" ]]; then
+            return 0
+        fi
+        if [[ "$password_auth" == "yes" ]]; then
+            status=$(passwd -S "$user" 2>/dev/null | awk '{print $2}')
+            [[ "$status" == "P" ]] && return 0
+        fi
+    done < <(getent passwd)
+
+    return 1
+}
+
 setup_ssh_keys() {
     if ! select_non_system_user manual; then
         return
@@ -1240,9 +1267,16 @@ setup_ssh_keys() {
     
     # Проверка и создание директории .ssh
     if [[ ! -d "/home/$username/.ssh" ]]; then
-        ${USE_SUDO:+$USE_SUDO }mkdir -p "/home/$username/.ssh"
-        ${USE_SUDO:+$USE_SUDO }chown "$username:$username" "/home/$username/.ssh"
-        ${USE_SUDO:+$USE_SUDO }chmod 700 "/home/$username/.ssh"
+        if ! ${USE_SUDO:+$USE_SUDO }mkdir -p "/home/$username/.ssh" ||
+            ! ${USE_SUDO:+$USE_SUDO }chown "$username:$username" "/home/$username/.ssh" ||
+            ! ${USE_SUDO:+$USE_SUDO }chmod 700 "/home/$username/.ssh"; then
+            red "Не удалось подготовить каталог .ssh для пользователя $username."
+            return 1
+        fi
+    elif ! ${USE_SUDO:+$USE_SUDO }chown "$username:$username" "/home/$username/.ssh" ||
+        ! ${USE_SUDO:+$USE_SUDO }chmod 700 "/home/$username/.ssh"; then
+        red "Не удалось проверить права каталога .ssh для пользователя $username."
+        return 1
     fi
     
     # Инструкции для пользователя
@@ -1264,12 +1298,21 @@ setup_ssh_keys() {
         red "nano не установлен. Установите его: apt install nano"
         return
     fi
-    ${USE_SUDO:+$USE_SUDO }nano "/home/$username/.ssh/authorized_keys"
-    
+    if ! ${USE_SUDO:+$USE_SUDO }nano "/home/$username/.ssh/authorized_keys"; then
+        red "Редактор nano завершился с ошибкой."
+        return 1
+    fi
+
     # Установка прав доступа
-    ${USE_SUDO:+$USE_SUDO }chown -R "$username:$username" "/home/$username/.ssh"
-    ${USE_SUDO:+$USE_SUDO }chmod 600 "/home/$username/.ssh/authorized_keys"
-    validate_and_restart_sshd
+    if [[ ! -s "/home/$username/.ssh/authorized_keys" ]] ||
+        ! ${USE_SUDO:+$USE_SUDO }chown -R "$username:$username" "/home/$username/.ssh" ||
+        ! ${USE_SUDO:+$USE_SUDO }chmod 600 "/home/$username/.ssh/authorized_keys"; then
+        red "Не удалось проверить или установить права SSH-ключей для пользователя $username."
+        return 1
+    fi
+    if ! validate_and_restart_sshd; then
+        return 1
+    fi
     
     green "Настройка SSH-ключей для пользователя $username завершена."
 }
@@ -1356,14 +1399,29 @@ disable_ping() {
 # Установка значения PermitRootLogin (с бекапом и рестартом sshd)
 set_permit_root_login() {
     local value=$1
-    cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak || { red "Не удалось создать резервную копию sshd_config."; return 1; }
-    if grep -qi '^\s*PermitRootLogin' /etc/ssh/sshd_config; then
-        sed -i "s/^\s*PermitRootLogin.*/PermitRootLogin $value/I" /etc/ssh/sshd_config
-    else
-        echo "PermitRootLogin $value" | tee -a /etc/ssh/sshd_config >/dev/null
+    local sshd_dropin="/etc/ssh/sshd_config.d/00-protection.conf"
+    mkdir -p "$(dirname "$sshd_dropin")" || { red "Не удалось создать каталог drop-in SSH."; return 1; }
+    if [[ -f "$sshd_dropin" ]]; then
+        cp "$sshd_dropin" "$sshd_dropin.bak" || { red "Не удалось создать резервную копию SSH drop-in."; return 1; }
+    fi
+    if [[ -f "$sshd_dropin" ]]; then
+        if ! sed -i -E "/^[[:space:]]*PermitRootLogin[[:space:]]/d; 1iPermitRootLogin $value" "$sshd_dropin"; then
+            red "Не удалось изменить PermitRootLogin."
+            return 1
+        fi
+    elif ! printf 'PermitRootLogin %s\n' "$value" > "$sshd_dropin"; then
+        red "Не удалось изменить PermitRootLogin."
+        return 1
     fi
     if ! validate_and_restart_sshd; then
         red "Не удалось применить PermitRootLogin $value."
+        [[ -f "$sshd_dropin.bak" ]] && cp "$sshd_dropin.bak" "$sshd_dropin" || rm -f "$sshd_dropin"
+        return 1
+    fi
+    if [[ "$(sshd -T 2>/dev/null | awk '/^permitrootlogin/ {print $2; exit}')" != "$value" ]]; then
+        red "Эффективное значение PermitRootLogin не совпало с ожидаемым: $value."
+        [[ -f "$sshd_dropin.bak" ]] && cp "$sshd_dropin.bak" "$sshd_dropin" || rm -f "$sshd_dropin"
+        validate_and_restart_sshd >/dev/null 2>&1
         return 1
     fi
 }
@@ -1390,6 +1448,10 @@ disable_root_ssh() {
     elif [[ "$ROOT_SSH_STATUS" == "prohibit-password" ]]; then
         yellow "Вход root по SSH разрешен только по ключам (вход по паролю отключен)."
         if [[ "$(prompt_yes_no "Полностью отключить вход root по SSH?" "no")" == "yes" ]]; then
+            if ! has_alternative_ssh_access; then
+                red "Отключение root по SSH отменено: не найден другой рабочий SSH-доступ с правами sudo/admin."
+                return 1
+            fi
             if set_permit_root_login no; then
                 purple "Вход root по SSH отключен."
             fi
@@ -1400,6 +1462,10 @@ disable_root_ssh() {
         fi
     else
         if [[ "$(prompt_yes_no "Хотите отключить вход root по SSH?" "no")" == "yes" ]]; then
+            if ! has_alternative_ssh_access; then
+                red "Отключение root по SSH отменено: не найден другой рабочий SSH-доступ с правами sudo/admin."
+                return 1
+            fi
             if set_permit_root_login no; then
                 purple "Вход root по SSH отключен."
             fi
@@ -1425,18 +1491,28 @@ change_port_ssh() {
                 red "Порт $NEW_SSH_PORT уже занят. Выберите другой."
                 continue
             fi
-            # Изменяем порт в конфигурации SSH
-            cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak || { red "Не удалось создать резервную копию sshd_config."; return 1; }
-            # Матчит Port с любым отступом (включая табы), чтобы избежать дублирования директивы
-            if grep -qE '^[[:space:]]*Port[[:space:]]' /etc/ssh/sshd_config; then
-                sed -i -E 's/^[[:space:]]*Port[[:space:]].*/Port '"$NEW_SSH_PORT"'/' /etc/ssh/sshd_config
-            else
-                echo "Port $NEW_SSH_PORT" | tee -a /etc/ssh/sshd_config >/dev/null
+            local sshd_dropin="/etc/ssh/sshd_config.d/00-protection.conf"
+            mkdir -p "$(dirname "$sshd_dropin")" || { red "Не удалось создать каталог drop-in SSH."; return 1; }
+            if [[ -f "$sshd_dropin" ]]; then
+                cp "$sshd_dropin" "$sshd_dropin.bak" || { red "Не удалось создать резервную копию SSH drop-in."; return 1; }
             fi
 
             # Открываем новый порт в UFW до рестарта sshd (если UFW активен)
             if ${USE_SUDO:+$USE_SUDO }ufw status 2>/dev/null | grep -q 'Status: active'; then
-                ufw_allow_port "$NEW_SSH_PORT" tcp
+                if ! ufw_allow_port "$NEW_SSH_PORT" tcp; then
+                    red "Не удалось открыть порт $NEW_SSH_PORT/tcp в UFW. SSH-конфигурация не изменена."
+                    return 1
+                fi
+            fi
+
+            if [[ -f "$sshd_dropin" ]]; then
+                if ! sed -i -E "/^[[:space:]]*Port[[:space:]]/d; 1iPort $NEW_SSH_PORT" "$sshd_dropin"; then
+                    red "Не удалось изменить порт SSH."
+                    return 1
+                fi
+            elif ! printf 'Port %s\n' "$NEW_SSH_PORT" > "$sshd_dropin"; then
+                red "Не удалось изменить порт SSH."
+                return 1
             fi
 
             # Перезапускаем SSH (для Ubuntu и Debian) с валидацией и авто-restore
@@ -1444,6 +1520,14 @@ change_port_ssh() {
             ${USE_SUDO:+$USE_SUDO }systemctl restart ssh.socket 2>/dev/null
             if ! validate_and_restart_sshd; then
                 red "Не удалось применить новый порт SSH. Проверьте конфигурацию вручную."
+                [[ -f "$sshd_dropin.bak" ]] && cp "$sshd_dropin.bak" "$sshd_dropin" || rm -f "$sshd_dropin"
+                validate_and_restart_sshd >/dev/null 2>&1
+                return 1
+            fi
+            if [[ "$(get_ssh_port)" != "$NEW_SSH_PORT" ]]; then
+                red "Эффективный порт SSH не совпал с ожидаемым: $NEW_SSH_PORT."
+                [[ -f "$sshd_dropin.bak" ]] && cp "$sshd_dropin.bak" "$sshd_dropin" || rm -f "$sshd_dropin"
+                validate_and_restart_sshd >/dev/null 2>&1
                 return 1
             fi
 
@@ -1472,7 +1556,15 @@ setup_ufw() {
 
     # Устанавливаем ufw, если не установлен
     if ! dpkg-query -W -f='${Status}' ufw 2>/dev/null | grep -q "install ok installed"; then
-        apt update -y && apt install -yq ufw
+        if ! apt update -y || ! apt install -yq ufw; then
+            red "Не удалось установить UFW."
+            return 1
+        fi
+    fi
+
+    if ! command -v ufw >/dev/null 2>&1; then
+        red "UFW установлен, но команда ufw недоступна."
+        return 1
     fi
     
     local CHECK_UFW=$(${USE_SUDO:+$USE_SUDO }ufw status 2>/dev/null)
@@ -1493,12 +1585,19 @@ setup_ufw() {
         CURRENT_SSH_PORT=$(get_ssh_port)
 
         # Разрешаем стандартные порты
-        ufw_allow_port 443 tcp
-        if validate_port "$CURRENT_SSH_PORT" 1 65535; then
-            ufw_allow_port "$CURRENT_SSH_PORT" tcp
-        else
-            red "SSH порт из конфигурации некорректен: $CURRENT_SSH_PORT"
-        fi
+            if ! ufw_allow_port 443 tcp; then
+                red "Не удалось открыть порт 443/tcp в UFW."
+                return 1
+            fi
+            if validate_port "$CURRENT_SSH_PORT" 1 65535; then
+                if ! ufw_allow_port "$CURRENT_SSH_PORT" tcp; then
+                    red "Не удалось открыть SSH-порт $CURRENT_SSH_PORT/tcp в UFW."
+                    return 1
+                fi
+            else
+                red "SSH порт из конфигурации некорректен: $CURRENT_SSH_PORT"
+                return 1
+            fi
 
 
 
@@ -1540,14 +1639,20 @@ ensure_ufw_ports() {
     
     # 443/tcp
     if ! ufw_rule_exists "443/tcp"; then
-        ufw_allow_port 443 tcp
-        purple "Добавлен порт 443/tcp в UFW."
+        if ufw_allow_port 443 tcp; then
+            purple "Добавлен порт 443/tcp в UFW."
+        else
+            red "Не удалось добавить порт 443/tcp в UFW."
+        fi
     fi
     
     # SSH порт
     if validate_port "$CURRENT_SSH_PORT" 1 65535 && ! ufw_rule_exists "$CURRENT_SSH_PORT/tcp"; then
-        ufw_allow_port "$CURRENT_SSH_PORT" tcp
-        purple "Добавлен порт $CURRENT_SSH_PORT/tcp в UFW."
+        if ufw_allow_port "$CURRENT_SSH_PORT" tcp; then
+            purple "Добавлен порт $CURRENT_SSH_PORT/tcp в UFW."
+        else
+            red "Не удалось добавить SSH-порт $CURRENT_SSH_PORT/tcp в UFW."
+        fi
     elif ! validate_port "$CURRENT_SSH_PORT" 1 65535; then
         red "SSH порт из конфигурации некорректен: $CURRENT_SSH_PORT"
     fi
@@ -1607,10 +1712,13 @@ ufw_menu() {
                     local UFW_TCP_PORT
                     for UFW_TCP_PORT in $UFW_TCP_PORTS; do
                         if validate_port "$UFW_TCP_PORT" 1 65535; then
-                            ufw_allow_port "$UFW_TCP_PORT" tcp
-                            purple "Порт $UFW_TCP_PORT/tcp добавлен."
-                            UFW_ADDED_COUNT=$((UFW_ADDED_COUNT + 1))
-                            UFW_ADDED_LIST="$UFW_ADDED_LIST $UFW_TCP_PORT"
+                            if ufw_allow_port "$UFW_TCP_PORT" tcp; then
+                                purple "Порт $UFW_TCP_PORT/tcp добавлен."
+                                UFW_ADDED_COUNT=$((UFW_ADDED_COUNT + 1))
+                                UFW_ADDED_LIST="$UFW_ADDED_LIST $UFW_TCP_PORT"
+                            else
+                                red "Не удалось добавить порт $UFW_TCP_PORT/tcp."
+                            fi
                         else
                             red "Недопустимый порт: $UFW_TCP_PORT. Пропускаем."
                         fi
@@ -1631,10 +1739,13 @@ ufw_menu() {
                     local UFW_UDP_PORT
                     for UFW_UDP_PORT in $UFW_UDP_PORTS; do
                         if validate_port "$UFW_UDP_PORT" 1 65535; then
-                            ufw_allow_port "$UFW_UDP_PORT" udp
-                            purple "Порт $UFW_UDP_PORT/udp добавлен."
-                            UFW_ADDED_COUNT=$((UFW_ADDED_COUNT + 1))
-                            UFW_ADDED_LIST="$UFW_ADDED_LIST $UFW_UDP_PORT"
+                            if ufw_allow_port "$UFW_UDP_PORT" udp; then
+                                purple "Порт $UFW_UDP_PORT/udp добавлен."
+                                UFW_ADDED_COUNT=$((UFW_ADDED_COUNT + 1))
+                                UFW_ADDED_LIST="$UFW_ADDED_LIST $UFW_UDP_PORT"
+                            else
+                                red "Не удалось добавить порт $UFW_UDP_PORT/udp."
+                            fi
                         else
                             red "Недопустимый порт: $UFW_UDP_PORT. Пропускаем."
                         fi
@@ -1681,8 +1792,12 @@ ufw_menu() {
                 fi
                 if ! ufw_rule_exists "$CURRENT_SSH_PORT/tcp"; then
                     if [[ "$(prompt_yes_no "SSH порт $CURRENT_SSH_PORT/tcp не разрешен. Добавить?" "no")" == "yes" ]]; then
-                        ufw_allow_port "$CURRENT_SSH_PORT" tcp
-                        purple "Добавлен порт $CURRENT_SSH_PORT/tcp."
+                        if ufw_allow_port "$CURRENT_SSH_PORT" tcp; then
+                            purple "Добавлен порт $CURRENT_SSH_PORT/tcp."
+                        else
+                            red "Не удалось добавить SSH-порт $CURRENT_SSH_PORT/tcp."
+                            continue
+                        fi
                     else
                         red "Включение ufw отменено, чтобы не потерять доступ."
                         break
@@ -1720,7 +1835,10 @@ install_fail2ban() {
         fi
     fi
 
-    apt update -y
+    if ! apt update -y; then
+        red "Не удалось обновить индекс пакетов."
+        return 1
+    fi
 
     # Устанавливаем nftables, если не установлен
     if ! command -v nft &>/dev/null; then
@@ -1739,7 +1857,10 @@ install_fail2ban() {
     fi
     
     # Устанавливаем fail2ban
-    apt install -yq fail2ban
+    if ! apt install -yq fail2ban || ! command -v fail2ban-client >/dev/null 2>&1; then
+        red "Не удалось установить fail2ban."
+        return 1
+    fi
     
     if [[ "$(prompt_yes_no "Хотите настроить fail2ban?" "no")" == "no" ]]; then
         systemctl stop fail2ban
@@ -1793,9 +1914,22 @@ findtime = $F2B_RECIDIVE_FINDTIME
 maxretry = $F2B_RECIDIVE_MAXRETRY
 action = nftables-allports[name=recidive]
 EOF
+
+    if ! fail2ban-client -t >/dev/null 2>&1; then
+        red "Конфигурация fail2ban не прошла проверку. Восстанавливаем резервную копию."
+        if [[ -f /etc/fail2ban/jail.local.bak ]]; then
+            cp /etc/fail2ban/jail.local.bak /etc/fail2ban/jail.local
+        else
+            rm -f /etc/fail2ban/jail.local
+        fi
+        return 1
+    fi
     
-    ${USE_SUDO:+$USE_SUDO }systemctl enable fail2ban
-    ${USE_SUDO:+$USE_SUDO }systemctl start fail2ban
+    if ! ${USE_SUDO:+$USE_SUDO }systemctl enable fail2ban ||
+        ! ${USE_SUDO:+$USE_SUDO }systemctl start fail2ban; then
+        red "Не удалось включить или запустить fail2ban."
+        return 1
+    fi
     if ! ${USE_SUDO:+$USE_SUDO }systemctl restart fail2ban; then
         red "Ошибка: fail2ban не запустился. Проверьте /etc/fail2ban/jail.local и журнал: journalctl -u fail2ban"
         return 1

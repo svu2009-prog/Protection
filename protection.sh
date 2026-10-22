@@ -15,7 +15,7 @@ CURRENT_SSH_PORT=""
 username=""
 password=""
 USE_SUDO=""
-PROTECTION_VERSION="1.3.3"
+PROTECTION_VERSION="1.3.4"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 
 # ============================================================
@@ -1847,9 +1847,6 @@ ufw_menu() {
                     fi
                 fi
                 ;;
-            10)
-                edit_fail2ban_jail_local
-                ;;
             0)
                 break
                 ;;
@@ -2229,11 +2226,14 @@ fail2ban_menu() {
                     red "Не найден файл логов /var/log/auth.log или /var/log/secure."
                 fi
                 ;;
+            10)
+                edit_fail2ban_jail_local
+                ;;
             0)
                 break
                 ;;
             *)
-                yellow "Введите число от 0 до 9 и нажмите ENTER"
+                yellow "Введите число от 0 до 10 и нажмите ENTER"
                 ;;
         esac
     done

@@ -15,7 +15,7 @@ CURRENT_SSH_PORT=""
 username=""
 password=""
 USE_SUDO=""
-PROTECTION_VERSION="1.3.2"
+PROTECTION_VERSION="1.3.3"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 
 # ============================================================
@@ -1864,6 +1864,49 @@ ufw_menu() {
 # FAIL2BAN
 # ============================================================
 
+# Создание /etc/fail2ban/jail.local с настройками по умолчанию
+generate_fail2ban_config() {
+    # Получаем текущий SSH порт для конфигурации
+    CURRENT_SSH_PORT=$(get_ssh_port)
+
+    cat > /etc/fail2ban/jail.local <<EOF
+[DEFAULT]
+# Время бана по умолчанию (1 час)
+bantime = $F2B_BANTIME_DEFAULT
+findtime = $F2B_FINDTIME_DEFAULT
+maxretry = $F2B_MAXRETRY_DEFAULT
+
+# Разрешённые IP (добавьте свои после 127.0.0.1 через пробел)
+ignoreip = 127.0.0.1/8 ::1
+
+# Действие по умолчанию — nftables
+banaction = nftables-multiport
+banaction_allports = nftables-allports
+backend = systemd
+
+[sshd]
+enabled = true
+port = $CURRENT_SSH_PORT
+filter = sshd
+logpath = /var/log/auth.log
+backend = polling
+maxretry = 3
+findtime = $F2B_FINDTIME_DEFAULT
+bantime = $F2B_SSHD_BANTIME
+
+[recidive]
+enabled = true
+filter = recidive
+logpath = /var/log/fail2ban.log
+backend  = polling
+# Жёсткий бан за рецидив: 2 бана за 2 дня -> блокировка на неделю
+bantime = $F2B_RECIDIVE_BANTIME
+findtime = $F2B_RECIDIVE_FINDTIME
+maxretry = $F2B_RECIDIVE_MAXRETRY
+action = nftables-allports[name=recidive]
+EOF
+}
+
 # Установка и настройка fail2ban
 install_fail2ban() {
     # Проверка наличия интернета
@@ -1917,42 +1960,7 @@ install_fail2ban() {
     fi
 
     # Создаем конфигурацию fail2ban
-    cat > /etc/fail2ban/jail.local <<EOF
-[DEFAULT]
-# Время бана по умолчанию (1 час)
-bantime = $F2B_BANTIME_DEFAULT
-findtime = $F2B_FINDTIME_DEFAULT
-maxretry = $F2B_MAXRETRY_DEFAULT
-
-# Разрешённые IP (добавьте свои после 127.0.0.1 через пробел)
-ignoreip = 127.0.0.1/8 ::1
-
-# Действие по умолчанию — nftables
-banaction = nftables-multiport
-banaction_allports = nftables-allports
-backend = systemd
-
-[sshd]
-enabled = true
-port = $CURRENT_SSH_PORT
-filter = sshd
-logpath = /var/log/auth.log
-backend = polling
-maxretry = 3
-findtime = $F2B_FINDTIME_DEFAULT
-bantime = $F2B_SSHD_BANTIME
-
-[recidive]
-enabled = true
-filter = recidive
-logpath = /var/log/fail2ban.log
-backend  = polling
-# Жёсткий бан за рецидив: 2 бана за 2 дня -> блокировка на неделю
-bantime = $F2B_RECIDIVE_BANTIME
-findtime = $F2B_RECIDIVE_FINDTIME
-maxretry = $F2B_RECIDIVE_MAXRETRY
-action = nftables-allports[name=recidive]
-EOF
+    generate_fail2ban_config
 
     if ! fail2ban-client -t >/dev/null 2>&1; then
         red "Конфигурация fail2ban не прошла проверку. Восстанавливаем резервную копию."
@@ -2021,8 +2029,16 @@ edit_fail2ban_jail_local() {
     local jail_local_bak="${jail_local}.edit.bak"
 
     if [[ ! -f "$jail_local" ]]; then
-        red "Файл $jail_local не найден. Сначала настройте fail2ban."
-        return 1
+        yellow "Файл $jail_local не найден."
+        if [[ "$(prompt_yes_no "Создать $jail_local с настройками по умолчанию?" "yes")" == "yes" ]]; then
+            if ! generate_fail2ban_config; then
+                red "Не удалось создать $jail_local."
+                return 1
+            fi
+            purple "Файл $jail_local создан с настройками по умолчанию."
+        else
+            return 1
+        fi
     fi
 
     # Устанавливаем nano, если он не установлен
@@ -2052,7 +2068,8 @@ edit_fail2ban_jail_local() {
     fi
 
     green "Редактирование $jail_local в nano. Сохранить: Ctrl+O, выход: Ctrl+X."
-    ${USE_SUDO:+$USE_SUDO }nano "$jail_local"
+    ${USE_SUDO:+$USE_SUDO }nano "$jail_local" </dev/tty
+    local nano_exit=$?
 
     # Проверка конфигурации после редактирования
     if ! ${USE_SUDO:+$USE_SUDO }fail2ban-client -t >/dev/null 2>&1; then

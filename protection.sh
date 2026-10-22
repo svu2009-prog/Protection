@@ -15,7 +15,7 @@ CURRENT_SSH_PORT=""
 username=""
 password=""
 USE_SUDO=""
-PROTECTION_VERSION="1.2.5"
+PROTECTION_VERSION="1.2.6"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 
 # ============================================================
@@ -703,13 +703,33 @@ prompt_yes_no() {
 apply_sysctl_keys() {
     local dropin="/etc/sysctl.d/99-protection.conf"
     local pair key esc failed=0
+    local -A managed_keys=()
+    local preserved_lines=() line existing_key failed_keys=""
 
+    # Ключи, которые перезаписываются этим вызовом
+    for pair in "$@"; do
+        managed_keys["${pair%%=*}"]=1
+    done
+
+    # Сохраняем ключи из существующего дроп-ина, которые этот вызов не перезаписывает
+    # (иначе, например, отключение ping затирало настройку IPv6 и наоборот)
     if [[ -f "$dropin" ]]; then
         cp "$dropin" "$dropin.bak" || { red "Не удалось создать резервную копию $dropin."; return 1; }
+        while IFS= read -r line; do
+            [[ "$line" =~ ^[[:space:]]*([A-Za-z0-9._-]+)[[:space:]]*= ]] || continue
+            existing_key="${BASH_REMATCH[1]}"
+            [[ -n "${managed_keys[$existing_key]:-}" ]] && continue
+            preserved_lines+=("$line")
+        done < "$dropin"
     fi
 
     {
         echo "# Файл управляется скриптом protection"
+        if (( ${#preserved_lines[@]} )); then
+            for line in "${preserved_lines[@]}"; do
+                echo "$line"
+            done
+        fi
         for pair in "$@"; do
             echo "$pair"
         done
@@ -737,8 +757,12 @@ apply_sysctl_keys() {
     for pair in "$@"; do
         if ! sysctl -w "$pair" >/dev/null 2>&1; then
             failed=1
+            failed_keys="$failed_keys ${pair%%=*}"
         fi
     done
+    if [[ -n "$failed_keys" ]]; then
+        red "sysctl -w не смог применить ключи:$failed_keys"
+    fi
     return "$failed"
 }
 
@@ -844,6 +868,54 @@ ensure_ipv6_module() {
     return 1
 }
 
+# Прямая запись значения disable_ipv6 в каждый существующий интерфейс через /proc.
+# Нужно, потому что на части ядер запись в conf.all/default не затрагивает уже
+# поднятые интерфейсы. Прямая запись работает и для имён с точкой (eth0.100).
+ipv6_set_all_interfaces() {
+    local value=$1 iface_dir iface
+    for iface_dir in /proc/sys/net/ipv6/conf/*; do
+        [[ -f "$iface_dir/disable_ipv6" ]] || continue
+        iface="${iface_dir##*/}"
+        if echo "$value" > "$iface_dir/disable_ipv6" 2>/dev/null; then
+            green "  $iface: disable_ipv6=$value"
+        else
+            yellow "  $iface: не удалось записать disable_ipv6=$value"
+        fi
+    done
+}
+
+# Проверка статуса отключения IPv6: возвращает 0, если all/default/lo = 1
+ipv6_is_disabled() {
+    local v_all v_def v_lo
+    v_all=$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null)
+    v_def=$(sysctl -n net.ipv6.conf.default.disable_ipv6 2>/dev/null)
+    v_lo=$(sysctl -n net.ipv6.conf.lo.disable_ipv6 2>/dev/null)
+    [[ "$v_all" == "1" && "$v_def" == "1" && "$v_lo" == "1" ]]
+}
+
+# Проверка статуса включения IPv6: возвращает 0, если all/default/lo = 0
+ipv6_is_enabled() {
+    local v_all v_def v_lo
+    v_all=$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null)
+    v_def=$(sysctl -n net.ipv6.conf.default.disable_ipv6 2>/dev/null)
+    v_lo=$(sysctl -n net.ipv6.conf.lo.disable_ipv6 2>/dev/null)
+    [[ "$v_all" == "0" && "$v_def" == "0" && "$v_lo" == "0" ]]
+}
+
+# Диагностика при неудачном применении настроек IPv6
+ipv6_diagnostics() {
+    yellow "Диагностика:"
+    if command -v lsmod &>/dev/null; then
+        lsmod 2>/dev/null | grep -E '^ipv6' || yellow "  модуль ipv6 не отображается в lsmod"
+    fi
+    echo "  Текущие значения sysctl:"
+    sysctl net.ipv6.conf.all.disable_ipv6 net.ipv6.conf.default.disable_ipv6 net.ipv6.conf.lo.disable_ipv6 2>&1 | sed 's/^/    /'
+    if [[ -f /etc/sysctl.d/99-protection.conf ]]; then
+        echo "  Содержимое /etc/sysctl.d/99-protection.conf:"
+        sed 's/^/    /' /etc/sysctl.d/99-protection.conf
+    fi
+}
+
 # Функция для отключения/включения IPv6
 disable_ipv6() {
     # Без модуля ipv6 sysctl-ключи недоступны — включение/отключение IPv6 не работает
@@ -853,34 +925,52 @@ disable_ipv6() {
     fi
 
     # Проверяем текущий статус IPv6
-    IPV6_STATUS_ALL=$(sysctl net.ipv6.conf.all.disable_ipv6 2>/dev/null | awk '{print $3}')
-    IPV6_STATUS_DEFAULT=$(sysctl net.ipv6.conf.default.disable_ipv6 2>/dev/null | awk '{print $3}')
-    IPV6_STATUS_LO=$(sysctl net.ipv6.conf.lo.disable_ipv6 2>/dev/null | awk '{print $3}')
+    IPV6_STATUS_ALL=$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null)
+    IPV6_STATUS_DEFAULT=$(sysctl -n net.ipv6.conf.default.disable_ipv6 2>/dev/null)
+    IPV6_STATUS_LO=$(sysctl -n net.ipv6.conf.lo.disable_ipv6 2>/dev/null)
 
-    
     # Если IPv6 уже отключен
-    if [[ "$IPV6_STATUS_ALL" == "1" && "$IPV6_STATUS_DEFAULT" == "1" && "$IPV6_STATUS_LO" == "1" ]]; then
+    if ipv6_is_disabled; then
         green "IPv6 уже отключен во всех интерфейсах."
-        
+
         if [[ "$(prompt_yes_no "Хотите включить IPv6?" "no")" == "yes" ]]; then
-            if apply_sysctl_keys \
+            # Записываем параметры включения IPv6 в дроп-ин
+            if ! apply_sysctl_keys \
                 "net.ipv6.conf.all.disable_ipv6=0" \
                 "net.ipv6.conf.default.disable_ipv6=0" \
                 "net.ipv6.conf.lo.disable_ipv6=0"; then
+                red "Ошибка применения sysctl. Проверьте /etc/sysctl.d/99-protection.conf."
+            fi
+
+            # Повторное применение через sysctl -p/--system (как при ручной настройке)
+            if ! ipv6_is_enabled; then
+                green "Повторное применение настроек через sysctl -p и sysctl --system..."
+                ${USE_SUDO:+$USE_SUDO }sysctl -p /etc/sysctl.d/99-protection.conf >/dev/null 2>&1
+                ${USE_SUDO:+$USE_SUDO }sysctl --system >/dev/null 2>&1
+            fi
+
+            # Прямая запись в каждый существующий интерфейс
+            if ! ipv6_is_enabled; then
+                green "Прямая запись disable_ipv6=0 в интерфейсы..."
+                ipv6_set_all_interfaces 0
+            fi
+
+            if ipv6_is_enabled; then
                 ensure_ipv6_module_autoload
                 purple "IPv6 успешно включен."
             else
-                red "Ошибка применения sysctl. Проверьте /etc/sysctl.d/99-protection.conf."
+                red "Не удалось включить IPv6."
+                ipv6_diagnostics
             fi
         fi
         return
     fi
-    
+
     # Предлагаем отключить IPv6
     if [[ "$(prompt_yes_no "Хотите отключить IPv6?" "no")" == "no" ]]; then
         return
     fi
-    
+
     # Записываем параметры отключения IPv6 в дроп-ин
     if ! apply_sysctl_keys \
         "net.ipv6.conf.all.disable_ipv6=1" \
@@ -888,18 +978,29 @@ disable_ipv6() {
         "net.ipv6.conf.lo.disable_ipv6=1"; then
         red "Ошибка применения sysctl. Проверьте /etc/sysctl.d/99-protection.conf."
     fi
-    
+
+    # Повторное применение через sysctl -p/--system (как при ручной настройке)
+    if ! ipv6_is_disabled; then
+        green "Повторное применение настроек через sysctl -p и sysctl --system..."
+        ${USE_SUDO:+$USE_SUDO }sysctl -p /etc/sysctl.d/99-protection.conf >/dev/null 2>&1
+        ${USE_SUDO:+$USE_SUDO }sysctl --system >/dev/null 2>&1
+    fi
+
+    # Прямая запись в каждый существующий интерфейс (all/default не всегда
+    # затрагивают уже поднятые интерфейсы)
+    if ! ipv6_is_disabled; then
+        green "Прямая запись disable_ipv6=1 в интерфейсы..."
+        ipv6_set_all_interfaces 1
+    fi
+
     # Проверяем, что IPv6 отключен
-    local ipv6_all ipv6_default ipv6_lo
-    ipv6_all=$(sysctl net.ipv6.conf.all.disable_ipv6 2>/dev/null | awk '{print $3}')
-    ipv6_default=$(sysctl net.ipv6.conf.default.disable_ipv6 2>/dev/null | awk '{print $3}')
-    ipv6_lo=$(sysctl net.ipv6.conf.lo.disable_ipv6 2>/dev/null | awk '{print $3}')
-    if [[ "$ipv6_all" == "1" && "$ipv6_default" == "1" && "$ipv6_lo" == "1" ]]; then
+    if ipv6_is_disabled; then
         ensure_ipv6_module_autoload
         purple "IPv6 успешно отключен во всех интерфейсах."
         green "Рекомендуется перезагрузить систему для полного применения изменений."
     else
         red "Ошибка при отключении IPv6. Проверьте настройки вручную."
+        ipv6_diagnostics
     fi
 }
 

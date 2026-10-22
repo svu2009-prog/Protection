@@ -15,7 +15,7 @@ CURRENT_SSH_PORT=""
 username=""
 password=""
 USE_SUDO=""
-PROTECTION_VERSION="1.3.0"
+PROTECTION_VERSION="1.3.1"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 
 # ============================================================
@@ -876,39 +876,63 @@ ensure_ipv6_module() {
 # Нужно, потому что на части ядер запись в conf.all/default не затрагивает уже
 # поднятые интерфейсы. Прямая запись работает и для имён с точкой (eth0.100).
 ipv6_set_all_interfaces() {
-    local value=$1 iface_dir iface
+    local value=$1 iface_dir iface actual failed=0 found=0
     for iface_dir in /proc/sys/net/ipv6/conf/*; do
         [[ -f "$iface_dir/disable_ipv6" ]] || continue
+        found=1
         iface="${iface_dir##*/}"
-        if echo "$value" > "$iface_dir/disable_ipv6" 2>/dev/null; then
-            green "  $iface: disable_ipv6=$value"
+        if printf '%s\n' "$value" > "$iface_dir/disable_ipv6" 2>/dev/null; then
+            actual=$(cat "$iface_dir/disable_ipv6" 2>/dev/null)
+            if [[ "$actual" == "$value" ]]; then
+                green "  $iface: disable_ipv6=$value"
+            else
+                yellow "  $iface: ожидалось disable_ipv6=$value, фактически $actual"
+                failed=1
+            fi
         else
             yellow "  $iface: не удалось записать disable_ipv6=$value"
+            failed=1
         fi
     done
+    if (( ! found )); then
+        yellow "  Не найдено ни одного IPv6-интерфейса для изменения."
+        return 1
+    fi
+    return "$failed"
 }
 
-# Проверка статуса отключения IPv6: возвращает 0, если all/default/lo = 1
+# Проверка фактического состояния всех IPv6-интерфейсов.
+# Проверка только all/default/lo недостаточна: на некоторых VDS уже поднятые
+# интерфейсы не наследуют значение all и могут сохранить IPv6 включённым.
+ipv6_interfaces_have_value() {
+    local expected=$1 iface_dir actual failed=0 found=0
+    for iface_dir in /proc/sys/net/ipv6/conf/*; do
+        [[ -f "$iface_dir/disable_ipv6" ]] || continue
+        found=1
+        actual=$(cat "$iface_dir/disable_ipv6" 2>/dev/null)
+        [[ "$actual" == "$expected" ]] || failed=1
+    done
+    (( found && ! failed ))
+}
+
+# Проверка статуса отключения IPv6.
 ipv6_is_disabled() {
-    local v_all v_def v_lo
-    v_all=$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null)
-    v_def=$(sysctl -n net.ipv6.conf.default.disable_ipv6 2>/dev/null)
-    v_lo=$(sysctl -n net.ipv6.conf.lo.disable_ipv6 2>/dev/null)
-    [[ "$v_all" == "1" && "$v_def" == "1" && "$v_lo" == "1" ]]
+    ipv6_interfaces_have_value 1
 }
 
-# Проверка статуса включения IPv6: возвращает 0, если all/default/lo = 0
+# Проверка статуса включения IPv6.
 ipv6_is_enabled() {
-    local v_all v_def v_lo
-    v_all=$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null)
-    v_def=$(sysctl -n net.ipv6.conf.default.disable_ipv6 2>/dev/null)
-    v_lo=$(sysctl -n net.ipv6.conf.lo.disable_ipv6 2>/dev/null)
-    [[ "$v_all" == "0" && "$v_def" == "0" && "$v_lo" == "0" ]]
+    ipv6_interfaces_have_value 0
 }
 
 # Диагностика при неудачном применении настроек IPv6
 ipv6_diagnostics() {
     yellow "Диагностика:"
+    echo "  Ядро: $(uname -a 2>/dev/null)"
+    echo "  Параметры загрузки: $(cat /proc/cmdline 2>/dev/null)"
+    if command -v systemd-detect-virt &>/dev/null; then
+        echo "  Виртуализация: $(systemd-detect-virt 2>/dev/null || echo неизвестно)"
+    fi
     if command -v lsmod &>/dev/null; then
         lsmod 2>/dev/null | grep -E '^ipv6' || yellow "  модуль ipv6 не отображается в lsmod"
     fi
@@ -917,6 +941,18 @@ ipv6_diagnostics() {
     if [[ -f /etc/sysctl.d/99-protection.conf ]]; then
         echo "  Содержимое /etc/sysctl.d/99-protection.conf:"
         sed 's/^/    /' /etc/sysctl.d/99-protection.conf
+    fi
+    echo "  Значения disable_ipv6 по интерфейсам:"
+    for iface_dir in /proc/sys/net/ipv6/conf/*; do
+        [[ -f "$iface_dir/disable_ipv6" ]] || continue
+        printf '    %s: ' "${iface_dir##*/}"
+        cat "$iface_dir/disable_ipv6" 2>/dev/null || echo "недоступно"
+    done
+    if command -v ip &>/dev/null; then
+        echo "  IPv6-адреса:"
+        ip -6 addr 2>&1 | sed 's/^/    /'
+        echo "  IPv6-маршруты:"
+        ip -6 route 2>&1 | sed 's/^/    /'
     fi
 }
 

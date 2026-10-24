@@ -15,7 +15,7 @@ CURRENT_SSH_PORT=""
 username=""
 password=""
 USE_SUDO=""
-PROTECTION_VERSION="1.3.4"
+PROTECTION_VERSION="1.3.5"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 
 # ============================================================
@@ -23,7 +23,8 @@ PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 # ============================================================
 
 INFO_FILE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P)"
-[[ -z "$INFO_FILE_DIR" ]] && INFO_FILE_DIR="/root"
+# info.txt с паролями не храним в общедоступном /usr/local/bin
+[[ -z "$INFO_FILE_DIR" || "$INFO_FILE_DIR" == "/usr/local/bin" ]] && INFO_FILE_DIR="/root"
 INFO_FILE="$INFO_FILE_DIR/info.txt"
 
 F2B_BANTIME_DEFAULT=3600
@@ -186,16 +187,11 @@ esac
 # ============================================================
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 
-# Удаление ANSI-кодов
-strip_ansi() {
-    sed -r "s/\x1B\[[0-9;]*[A-Za-z]//g"
-}
-
 # Отрисовка интерактивного меню для select_menu.
 render_menu() {
     local title=$1 selected=$2 labels_name=$3 redraw=${4:-0}
     local -n labels_ref=$labels_name
-    local menu_lines=$((${#labels_ref[@]} + 4))
+    local menu_lines=$((${#labels_ref[@]} + 3))
     
     [[ -n "$title" ]] && menu_lines=$((menu_lines + 1))
     
@@ -309,7 +305,7 @@ select_menu() {
             $'\e')
                 typed=""
                 extra=""
-                IFS= read -rsn2 -t 0.05 extra || true
+                IFS= read -rsn2 -t 0.1 extra || true
                 case "$extra" in
                     "[A"|OD)
                         ((selected--))
@@ -592,7 +588,17 @@ add_user_nopasswd() {
         return
     fi
     
-    echo "$username ALL=(ALL) NOPASSWD:ALL" | tee "/etc/sudoers.d/$username" >/dev/null
+    local sudoers_line="$username ALL=(ALL) NOPASSWD:ALL"
+    if command -v visudo &>/dev/null; then
+        # visudo проверяет синтаксис и записывает атомарно
+        if ! printf '%s\n' "$sudoers_line" | visudo -f "/etc/sudoers.d/$username"; then
+            red "Не удалось записать /etc/sudoers.d/$username через visudo."
+            return 1
+        fi
+    elif ! printf '%s\n' "$sudoers_line" | tee "/etc/sudoers.d/$username" >/dev/null; then
+        red "Не удалось записать /etc/sudoers.d/$username."
+        return 1
+    fi
     if chmod 0440 "/etc/sudoers.d/$username" 2>/dev/null; then
         purple "Пользователь $username добавлен в группу для выполнения команд без пароля."
     else
@@ -686,7 +692,15 @@ prompt_yes_no() {
     esac
     
     while true; do
-        read -r -p "$prompt (yes/no)$default_hint: " response
+        if ! read -r -p "$prompt (yes/no)$default_hint: " response; then
+            # EOF (stdin закрыт) — возвращаем дефолт, не зацикливаемся
+            local eof_answer="$default"
+            [[ -z "$eof_answer" ]] && eof_answer="no"
+            red "Не удалось прочитать ответ, возвращаем '$eof_answer'." >&2
+            echo "$eof_answer"
+            [[ "$eof_answer" == "yes" ]] && return 0
+            return 1
+        fi
         [[ -z "$response" && -n "$default" ]] && response="$default"
         
         case "$response" in
@@ -965,9 +979,7 @@ disable_ipv6() {
     fi
 
     # Проверяем текущий статус IPv6
-    IPV6_STATUS_ALL=$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null)
-    IPV6_STATUS_DEFAULT=$(sysctl -n net.ipv6.conf.default.disable_ipv6 2>/dev/null)
-    IPV6_STATUS_LO=$(sysctl -n net.ipv6.conf.lo.disable_ipv6 2>/dev/null)
+
 
     # Если IPv6 уже отключен
     if ipv6_is_disabled; then
@@ -1300,17 +1312,26 @@ setup_ssh_keys() {
         return
     fi
     username="$SELECTED_USER"
+
+    # Домашний каталог берём из passwd, а не хардкодим /home/user
+    # (root и пользователи с нестандартным home получают корректный путь)
+    local user_home
+    user_home="$(getent passwd "$username" | cut -d: -f6)"
+    if [[ -z "$user_home" ]]; then
+        red "Не удалось определить домашний каталог пользователя $username."
+        return 1
+    fi
     
     # Проверка и создание директории .ssh
-    if [[ ! -d "/home/$username/.ssh" ]]; then
-        if ! ${USE_SUDO:+$USE_SUDO }mkdir -p "/home/$username/.ssh" ||
-            ! ${USE_SUDO:+$USE_SUDO }chown "$username:$username" "/home/$username/.ssh" ||
-            ! ${USE_SUDO:+$USE_SUDO }chmod 700 "/home/$username/.ssh"; then
+    if [[ ! -d "$user_home/.ssh" ]]; then
+        if ! ${USE_SUDO:+$USE_SUDO }mkdir -p "$user_home/.ssh" ||
+            ! ${USE_SUDO:+$USE_SUDO }chown "$username:$username" "$user_home/.ssh" ||
+            ! ${USE_SUDO:+$USE_SUDO }chmod 700 "$user_home/.ssh"; then
             red "Не удалось подготовить каталог .ssh для пользователя $username."
             return 1
         fi
-    elif ! ${USE_SUDO:+$USE_SUDO }chown "$username:$username" "/home/$username/.ssh" ||
-        ! ${USE_SUDO:+$USE_SUDO }chmod 700 "/home/$username/.ssh"; then
+    elif ! ${USE_SUDO:+$USE_SUDO }chown "$username:$username" "$user_home/.ssh" ||
+        ! ${USE_SUDO:+$USE_SUDO }chmod 700 "$user_home/.ssh"; then
         red "Не удалось проверить права каталога .ssh для пользователя $username."
         return 1
     fi
@@ -1334,15 +1355,15 @@ setup_ssh_keys() {
         red "nano не установлен. Установите его: apt install nano"
         return
     fi
-    if ! ${USE_SUDO:+$USE_SUDO }nano "/home/$username/.ssh/authorized_keys"; then
+    if ! ${USE_SUDO:+$USE_SUDO }nano "$user_home/.ssh/authorized_keys"; then
         red "Редактор nano завершился с ошибкой."
         return 1
     fi
 
     # Установка прав доступа
-    if [[ ! -s "/home/$username/.ssh/authorized_keys" ]] ||
-        ! ${USE_SUDO:+$USE_SUDO }chown -R "$username:$username" "/home/$username/.ssh" ||
-        ! ${USE_SUDO:+$USE_SUDO }chmod 600 "/home/$username/.ssh/authorized_keys"; then
+    if [[ ! -s "$user_home/.ssh/authorized_keys" ]] ||
+        ! ${USE_SUDO:+$USE_SUDO }chown -R "$username:$username" "$user_home/.ssh" ||
+        ! ${USE_SUDO:+$USE_SUDO }chmod 600 "$user_home/.ssh/authorized_keys"; then
         red "Не удалось проверить или установить права SSH-ключей для пользователя $username."
         return 1
     fi
@@ -1568,6 +1589,9 @@ change_port_ssh() {
             fi
 
             purple "Порт SSH изменен на $NEW_SSH_PORT."
+            if [[ -f /etc/fail2ban/jail.local ]] && ! grep -qE "^port = $NEW_SSH_PORT$" /etc/fail2ban/jail.local; then
+                yellow "Внимание: jail Fail2ban (jail.local) настроен не на порт $NEW_SSH_PORT — обновите конфигурацию Fail2ban (пункт 8 меню)."
+            fi
             CURRENT_SSH_PORT=$NEW_SSH_PORT
             break
         else
@@ -1592,7 +1616,7 @@ setup_ufw() {
 
     # Устанавливаем ufw, если не установлен
     if ! dpkg-query -W -f='${Status}' ufw 2>/dev/null | grep -q "install ok installed"; then
-        if ! apt update -y || ! apt install -yq ufw; then
+        if ! ${USE_SUDO:+$USE_SUDO }apt update -y || ! ${USE_SUDO:+$USE_SUDO }apt install -yq ufw; then
             red "Не удалось установить UFW."
             return 1
         fi
@@ -1612,6 +1636,12 @@ setup_ufw() {
         fi
         
         disable_ufw_if_active
+        yellow "ВНИМАНИЕ: ufw reset удалит ВСЕ существующие правила firewall."
+        ${USE_SUDO:+$USE_SUDO }ufw status 2>/dev/null
+        if [[ "$(prompt_yes_no "Все существующие правила будут удалены. Продолжить reset?" "no")" == "no" ]]; then
+            red "Сброс отменен, ufw не настроен."
+            return
+        fi
         if ! echo "y" | ${USE_SUDO:+$USE_SUDO }ufw reset >/dev/null 2>&1; then
             red "Ошибка при сбросе правил ufw (ufw reset)."
             return 1
@@ -1922,7 +1952,7 @@ install_fail2ban() {
     # Устанавливаем nftables, если не установлен
     if ! command -v nft &>/dev/null; then
         green "Устанавливаем nftables..."
-        if ! apt install -yq nftables; then
+        if ! ${USE_SUDO:+$USE_SUDO }apt install -yq nftables; then
             red "Не удалось установить nftables."
             return 1
         fi
@@ -1942,8 +1972,8 @@ install_fail2ban() {
     fi
     
     if [[ "$(prompt_yes_no "Хотите настроить fail2ban?" "no")" == "no" ]]; then
-        systemctl stop fail2ban
-        systemctl disable fail2ban
+        ${USE_SUDO:+$USE_SUDO }systemctl stop fail2ban
+        ${USE_SUDO:+$USE_SUDO }systemctl disable fail2ban
         red "fail2ban отключен."
         return
     fi
@@ -1953,18 +1983,18 @@ install_fail2ban() {
     
     # Резервная копия существующего jail.local (если есть)
     if [[ -f /etc/fail2ban/jail.local ]]; then
-        cp /etc/fail2ban/jail.local /etc/fail2ban/jail.local.bak || { red "Не удалось создать резервную копию jail.local."; return 1; }
+        ${USE_SUDO:+$USE_SUDO }cp /etc/fail2ban/jail.local /etc/fail2ban/jail.local.bak || { red "Не удалось создать резервную копию jail.local."; return 1; }
     fi
 
     # Создаем конфигурацию fail2ban
     generate_fail2ban_config
 
-    if ! fail2ban-client -t >/dev/null 2>&1; then
+    if ! ${USE_SUDO:+$USE_SUDO }fail2ban-client -t >/dev/null 2>&1; then
         red "Конфигурация fail2ban не прошла проверку. Восстанавливаем резервную копию."
         if [[ -f /etc/fail2ban/jail.local.bak ]]; then
-            cp /etc/fail2ban/jail.local.bak /etc/fail2ban/jail.local
+            ${USE_SUDO:+$USE_SUDO }cp /etc/fail2ban/jail.local.bak /etc/fail2ban/jail.local
         else
-            rm -f /etc/fail2ban/jail.local
+            ${USE_SUDO:+$USE_SUDO }rm -f /etc/fail2ban/jail.local
         fi
         return 1
     fi
@@ -1977,6 +2007,9 @@ install_fail2ban() {
     if ! ${USE_SUDO:+$USE_SUDO }systemctl restart fail2ban; then
         red "Ошибка: fail2ban не запустился. Проверьте /etc/fail2ban/jail.local и журнал: journalctl -u fail2ban"
         return 1
+    fi
+    if ! ${USE_SUDO:+$USE_SUDO }fail2ban-client status sshd &>/dev/null; then
+        yellow "Внимание: jail sshd не активен — проверьте, что существует /var/log/auth.log (на минимальных Ubuntu 22.04+ он может отсутствовать)."
     fi
     purple "fail2ban установлен и настроен."
 }
@@ -2047,7 +2080,7 @@ edit_fail2ban_jail_local() {
             fi
         fi
         green "Устанавливаем nano..."
-        if ! apt update -y; then
+        if ! ${USE_SUDO:+$USE_SUDO }apt update -y; then
             red "Не удалось обновить индекс пакетов."
             return 1
         fi
@@ -2066,7 +2099,6 @@ edit_fail2ban_jail_local() {
 
     green "Редактирование $jail_local в nano. Сохранить: Ctrl+O, выход: Ctrl+X."
     ${USE_SUDO:+$USE_SUDO }nano "$jail_local" </dev/tty
-    local nano_exit=$?
 
     # Проверка конфигурации после редактирования
     if ! ${USE_SUDO:+$USE_SUDO }fail2ban-client -t >/dev/null 2>&1; then
@@ -2185,7 +2217,7 @@ fail2ban_menu() {
                             banned_ips_values+=("$((i+1))")
                         done
                         select_menu "Выберите IP для разбана:" banned_ips_labels banned_ips_values
-                        if [[ -n "$MENU_CHOICE" ]]; then
+                        if [[ "$MENU_CHOICE" =~ ^[0-9]+$ ]] && (( MENU_CHOICE >= 1 && MENU_CHOICE <= ${#banned_ips_map[@]} )); then
                             local selected_ip="${banned_ips_map[$((MENU_CHOICE - 1))]}"
                             for j in $FB_JAILS; do
                                 ${USE_SUDO:+$USE_SUDO }fail2ban-client set "$j" unbanip "$selected_ip" 2>/dev/null
@@ -2292,7 +2324,7 @@ docker_menu() {
             2)
                 if command -v docker &>/dev/null; then
                     if [[ "$(prompt_yes_no "Хотите обновить Docker?" "no")" == "yes" ]]; then
-                        if apt-get update && apt-get upgrade -y docker-ce docker-ce-cli containerd.io; then
+                        if ${USE_SUDO:+$USE_SUDO }apt-get update && ${USE_SUDO:+$USE_SUDO }apt-get upgrade -y docker-ce docker-ce-cli containerd.io; then
                             purple "Docker успешно обновлен."
                         else
                             red "Ошибка при обновлении Docker."
@@ -2609,9 +2641,11 @@ install_docker() {
         fi
         
         if [[ "$(prompt_yes_no "Хотите обновить Docker?" "no")" == "yes" ]]; then
-            apt-get update
-            apt-get upgrade -y docker-ce docker-ce-cli containerd.io
-            purple "Docker успешно обновлен."
+            if ${USE_SUDO:+$USE_SUDO }apt-get update && ${USE_SUDO:+$USE_SUDO }apt-get upgrade -y docker-ce docker-ce-cli containerd.io; then
+                purple "Docker успешно обновлен."
+            else
+                yellow "apt-get upgrade не удался (возможно, Docker установлен из distro-репозитория)."
+            fi
         fi
         
         return
@@ -2737,7 +2771,12 @@ new_user() {
         else
             # Создание нового пользователя
             while true; do
-                local recommended_password=$(head -c 64 /dev/urandom | tr -dc A-Za-z0-9 | head -c 15)
+                # Генерируем пароль, проходящий validate_password (все классы символов)
+                local recommended_password
+                while true; do
+                    recommended_password=$(head -c 96 /dev/urandom | tr -dc A-Za-z0-9 | head -c 16)
+                    validate_password "$recommended_password" && break
+                done
                 
                 if [[ "$(prompt_yes_no "Рекомендуемый пароль пользователя $recommended_password, оставить?" "yes")" == "yes" ]]; then
                     password=$recommended_password

@@ -8,24 +8,19 @@ set -o pipefail
 # ============================================================
 
 # Переменные
-ROOT_PASSWORD=""
 ROOT_SSH_STATUS=""
 PING_STATUS=""
 CURRENT_SSH_PORT=""
 username=""
-password=""
 USE_SUDO=""
-PROTECTION_VERSION="1.3.7"
+PROTECTION_VERSION="1.3.9"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 
 # ============================================================
 # КОНФИГУРАЦИЯ ПО УМОЛЧАНИЮ
 # ============================================================
 
-INFO_FILE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P)"
-# info.txt с паролями не храним в общедоступном /usr/local/bin
-[[ -z "$INFO_FILE_DIR" || "$INFO_FILE_DIR" == "/usr/local/bin" ]] && INFO_FILE_DIR="/root"
-INFO_FILE="$INFO_FILE_DIR/info.txt"
+INFO_FILE="/root/info.txt"
 
 F2B_BANTIME_DEFAULT=3600
 F2B_FINDTIME_DEFAULT=2400
@@ -109,7 +104,7 @@ get_script_version() {
 }
 
 ensure_global_command() {
-    local script_path installed_version version_status command_dir
+    local script_path installed_version version_status command_dir temp_path
 
     if ! script_path="$(resolve_current_script_path)"; then
         yellow "Не удалось определить путь к текущему скрипту, команда protection не создана."
@@ -144,13 +139,16 @@ ensure_global_command() {
         return 1
     fi
 
-    if ! ${USE_SUDO:+$USE_SUDO }cp --remove-destination "$script_path" "$PROTECTION_COMMAND_PATH"; then
-        red "Не удалось создать глобальную команду $PROTECTION_COMMAND_PATH."
+    if ! temp_path=$(${USE_SUDO:+$USE_SUDO }mktemp "$command_dir/.protection.XXXXXX"); then
+        red "Не удалось создать временный файл для команды protection."
         return 1
     fi
 
-    if ! ${USE_SUDO:+$USE_SUDO }chmod +x "$PROTECTION_COMMAND_PATH"; then
-        red "Не удалось сделать $PROTECTION_COMMAND_PATH исполняемым."
+    if ! ${USE_SUDO:+$USE_SUDO }cp "$script_path" "$temp_path" ||
+        ! ${USE_SUDO:+$USE_SUDO }chmod 755 "$temp_path" ||
+        ! ${USE_SUDO:+$USE_SUDO }mv -f "$temp_path" "$PROTECTION_COMMAND_PATH"; then
+        ${USE_SUDO:+$USE_SUDO }rm -f "$temp_path"
+        red "Не удалось атомарно установить глобальную команду $PROTECTION_COMMAND_PATH."
         return 1
     fi
 
@@ -168,13 +166,17 @@ color_echo() {
 }
 
 # Цветные обертки для различных типов сообщений
+# shellcheck disable=SC2329 # Обёртки предназначены для вызова из меню и расширений.
 black() { color_echo 90 "$1"; }
 red() { color_echo 91 "$1"; }
 green() { color_echo 92 "$1"; }
 yellow() { color_echo 93 "$1"; }
+# shellcheck disable=SC2329 # Обёртки предназначены для вызова из меню и расширений.
 blue() { color_echo 94 "$1"; }
 purple() { color_echo 95 "$1"; }
+# shellcheck disable=SC2329 # Обёртки предназначены для вызова из меню и расширений.
 cyan() { color_echo 96 "$1"; }
+# shellcheck disable=SC2329 # Обёртки предназначены для вызова из меню и расширений.
 white() { color_echo 97 "$1"; }
 
 case "${1:-}" in
@@ -402,6 +404,7 @@ service_short_status() {
 }
 
 # Обработчик прерывания
+# shellcheck disable=SC2329 # Вызывается trap on_interrupt INT.
 on_interrupt() {
     red "Работа скрипта прервана пользователем."
     exit 1
@@ -568,42 +571,38 @@ validate_password() {
 # ФУНКЦИИ РАБОТЫ С UFW
 # ============================================================
 
-# Отключение UFW, если он активен
-disable_ufw_if_active() {
-    if ${USE_SUDO:+$USE_SUDO }ufw status 2>/dev/null | grep -q 'Status: active'; then
-        ${USE_SUDO:+$USE_SUDO }ufw disable >/dev/null 2>&1
-    fi
-}
-
 # ============================================================
 # ФУНКЦИИ УПРАВЛЕНИЯ ПОЛЬЗОВАТЕЛЯМИ
 # ============================================================
 
 # Добавление пользователя в sudoers для выполнения команд без пароля
 add_user_nopasswd() {
-    local username=$1
+    local username=$1 sudoers_file temp_file
     
     if [[ -z "$USE_SUDO" ]]; then
         yellow "sudo не установлен, пропускаем настройку NOPASSWD"
         return
     fi
     
-    local sudoers_line="$username ALL=(ALL) NOPASSWD:ALL"
-    if command -v visudo &>/dev/null; then
-        # visudo проверяет синтаксис и записывает атомарно
-        if ! printf '%s\n' "$sudoers_line" | visudo -f "/etc/sudoers.d/$username"; then
-            red "Не удалось записать /etc/sudoers.d/$username через visudo."
-            return 1
-        fi
-    elif ! printf '%s\n' "$sudoers_line" | tee "/etc/sudoers.d/$username" >/dev/null; then
-        red "Не удалось записать /etc/sudoers.d/$username."
+    if ! command -v visudo &>/dev/null; then
+        red "Команда visudo не найдена; настройка sudoers отменена."
         return 1
     fi
-    if chmod 0440 "/etc/sudoers.d/$username" 2>/dev/null; then
-        purple "Пользователь $username добавлен в группу для выполнения команд без пароля."
-    else
-        red "Не удалось выставить права 0440 на /etc/sudoers.d/$username — sudo может игнорировать файл."
+
+    sudoers_file="/etc/sudoers.d/$username"
+    if ! temp_file=$(mktemp "/etc/sudoers.d/.${username}.XXXXXX"); then
+        red "Не удалось создать временный sudoers-файл."
+        return 1
     fi
+    if ! printf '%s ALL=(ALL) NOPASSWD:ALL\n' "$username" > "$temp_file" ||
+        ! chmod 0440 "$temp_file" ||
+        ! visudo -cf "$temp_file" >/dev/null ||
+        ! mv -f -- "$temp_file" "$sudoers_file"; then
+        rm -f -- "$temp_file"
+        red "Не удалось проверить и атомарно установить /etc/sudoers.d/$username."
+        return 1
+    fi
+    purple "Пользователь $username добавлен в группу для выполнения команд без пароля."
 }
 
 # Удаление пользователя из sudoers (возврат требования пароля)
@@ -653,24 +652,30 @@ change_root_pass() {
     fi
     
     while true; do
-        read -rs -p "Введите новый пароль для root: " ROOT_PASSWORD
+        local root_password
+        read -rs -p "Введите новый пароль для root: " root_password
         echo
         
-        if validate_password "$ROOT_PASSWORD"; then
+        if validate_password "$root_password"; then
             read -rs -p "Повторите новый пароль для root: " ROOT_PASSWORD_CONFIRM
             echo
             
-            if [[ "$ROOT_PASSWORD" == "$ROOT_PASSWORD_CONFIRM" ]]; then
-                if printf '%s\n' "root:$ROOT_PASSWORD" | chpasswd; then
+            if [[ "$root_password" == "$ROOT_PASSWORD_CONFIRM" ]]; then
+                if printf '%s\n' "root:$root_password" | chpasswd; then
                     green "Пароль root успешно изменен."
+                    unset root_password ROOT_PASSWORD_CONFIRM
                     break
                 else
                     red "Не удалось изменить пароль root."
+                    unset root_password ROOT_PASSWORD_CONFIRM
                     break
                 fi
             else
                 red "Пароли не совпадают. Попробуйте снова."
+                unset root_password ROOT_PASSWORD_CONFIRM
             fi
+        else
+            unset root_password
         fi
     done
 }
@@ -1151,6 +1156,7 @@ users_menu() {
     fi
     
     while true; do
+        # shellcheck disable=SC2034 # Массивы читаются select_menu по имени через nameref.
         local user_menu_labels=(
             "1. Показать пользователей"
             "2. Поменять пароль пользователя"
@@ -1162,6 +1168,7 @@ users_menu() {
             "8. Удалить пользователя"
             "0. Назад"
         )
+        # shellcheck disable=SC2034 # Массивы читаются select_menu по имени через nameref.
         local user_menu_values=(1 2 3 4 5 6 7 8 0)
         local USER_MENU TARGET_GROUP
         
@@ -1248,27 +1255,12 @@ users_menu() {
 # НАСТРОЙКА SSH-КЛЮЧЕЙ
 # ============================================================
 
-# Валидация sshd_config и безопасный рестарт sshd с авто-восстановлением из .bak.
-# Возвращает 0 при успехе, 1 при провале (конфиг восстановлен, если был бэкап).
+# Проверка sshd_config и безопасный рестарт sshd.
+# Откат изменяемого drop-in выполняет вызывающая функция по своей свежей копии.
 validate_and_restart_sshd() {
-    local sshd_config="/etc/ssh/sshd_config"
-    local sshd_bak="${sshd_config}.bak"
-
-    # Предварительная проверка синтаксиса sshd_config
     if ! ${USE_SUDO:+$USE_SUDO }sshd -t 2>/dev/null; then
-        red "Ошибка: sshd_config невалиден (sshd -t завершился с ошибкой)."
-        if [[ -f "$sshd_bak" ]]; then
-            ${USE_SUDO:+$USE_SUDO }cp "$sshd_bak" "$sshd_config"
-            yellow "sshd_config восстановлен из резервной копии $sshd_bak."
-            # Повторная проверка восстановленного конфига
-            if ! ${USE_SUDO:+$USE_SUDO }sshd -t 2>/dev/null; then
-                red "Внимание: восстановленный sshd_config тоже невалиден — проверьте вручную!"
-                return 1
-            fi
-        else
-            red "Резервная копия $sshd_bak не найдена — невозможно восстановить."
-            return 1
-        fi
+        red "Ошибка: конфигурация sshd невалидна (sshd -t завершился с ошибкой)."
+        return 1
     fi
 
     # Перезапуск sshd: сначала ssh (Ubuntu/Debian), затем sshd (fallback)
@@ -1282,6 +1274,17 @@ validate_and_restart_sshd() {
     red "Ошибка: не удалось перезапустить службу sshd (ssh/sshd)."
     red "Внимание: текущая SSH-сессия может быть затронута. Проверьте статус службы вручную."
     return 1
+}
+
+# Восстановить именно предыдущее состояние drop-in SSH, не используя старый .bak.
+restore_sshd_dropin() {
+    local dropin=$1 backup=$2 existed=$3
+    if [[ "$existed" == "yes" ]]; then
+        cp -p -- "$backup" "$dropin" || { red "Не удалось восстановить $dropin из $backup."; return 1; }
+    else
+        rm -f -- "$dropin" || { red "Не удалось удалить новый файл $dropin при откате."; return 1; }
+    fi
+    validate_and_restart_sshd
 }
 
 # Проверка наличия другого рабочего способа входа по SSH с правами администратора.
@@ -1409,7 +1412,9 @@ create_user() {
     
     # Добавляем в sudoers без пароля, если требуется и sudo установлен
     if [[ "$nopass" == "yes" && -n "$USE_SUDO" ]]; then
-        add_user_nopasswd "$username"
+        if ! add_user_nopasswd "$username"; then
+            yellow "Пользователь создан, но настройку NOPASSWD не удалось применить."
+        fi
     fi
     
     yellow "Проверяем какие права имеет пользователь $username"
@@ -1457,30 +1462,38 @@ disable_ping() {
 set_permit_root_login() {
     local value=$1
     local sshd_dropin="/etc/ssh/sshd_config.d/00-protection.conf"
+    local backup="" existed="no"
     mkdir -p "$(dirname "$sshd_dropin")" || { red "Не удалось создать каталог drop-in SSH."; return 1; }
     if [[ -f "$sshd_dropin" ]]; then
-        cp "$sshd_dropin" "$sshd_dropin.bak" || { red "Не удалось создать резервную копию SSH drop-in."; return 1; }
+        existed="yes"
+        backup=$(mktemp "$(dirname "$sshd_dropin")/.00-protection.XXXXXX") || { red "Не удалось создать резервную копию SSH drop-in."; return 1; }
+        cp -p -- "$sshd_dropin" "$backup" || { rm -f -- "$backup"; red "Не удалось создать резервную копию SSH drop-in."; return 1; }
     fi
     if [[ -f "$sshd_dropin" ]]; then
         if ! sed -i -E "/^[[:space:]]*PermitRootLogin[[:space:]]/d; 1iPermitRootLogin $value" "$sshd_dropin"; then
+            restore_sshd_dropin "$sshd_dropin" "$backup" "$existed" || red "Требуется ручная проверка конфигурации SSH после неудачного отката."
+            [[ -n "$backup" ]] && rm -f -- "$backup"
             red "Не удалось изменить PermitRootLogin."
             return 1
         fi
     elif ! printf 'PermitRootLogin %s\n' "$value" > "$sshd_dropin"; then
+        rm -f -- "$sshd_dropin"
         red "Не удалось изменить PermitRootLogin."
         return 1
     fi
     if ! validate_and_restart_sshd; then
         red "Не удалось применить PermitRootLogin $value."
-        [[ -f "$sshd_dropin.bak" ]] && cp "$sshd_dropin.bak" "$sshd_dropin" || rm -f "$sshd_dropin"
+        restore_sshd_dropin "$sshd_dropin" "$backup" "$existed" || red "Требуется ручная проверка конфигурации SSH после неудачного отката."
+        [[ -n "$backup" ]] && rm -f -- "$backup"
         return 1
     fi
     if [[ "$(sshd -T 2>/dev/null | awk '/^permitrootlogin/ {print $2; exit}')" != "$value" ]]; then
         red "Эффективное значение PermitRootLogin не совпало с ожидаемым: $value."
-        [[ -f "$sshd_dropin.bak" ]] && cp "$sshd_dropin.bak" "$sshd_dropin" || rm -f "$sshd_dropin"
-        validate_and_restart_sshd >/dev/null 2>&1
+        restore_sshd_dropin "$sshd_dropin" "$backup" "$existed" || red "Требуется ручная проверка конфигурации SSH после неудачного отката."
+        [[ -n "$backup" ]] && rm -f -- "$backup"
         return 1
     fi
+    [[ -n "$backup" ]] && rm -f -- "$backup"
 }
 
 # Отключение/включение входа root по SSH
@@ -1533,7 +1546,7 @@ disable_root_ssh() {
 
 # Изменение порта SSH
 change_port_ssh() {
-    local NEW_SSH_PORT
+    local NEW_SSH_PORT sshd_dropin backup existed ufw_rule_added
     CURRENT_SSH_PORT=$(get_ssh_port)
     
     if [[ "$(prompt_yes_no "Порт SSH = $CURRENT_SSH_PORT, хотите изменить его?" "no")" == "no" ]]; then
@@ -1548,15 +1561,28 @@ change_port_ssh() {
                 red "Порт $NEW_SSH_PORT уже занят. Выберите другой."
                 continue
             fi
-            local sshd_dropin="/etc/ssh/sshd_config.d/00-protection.conf"
+            if systemctl is-active --quiet ssh.socket 2>/dev/null; then
+                red "Обнаружена socket-активация ssh.socket. Изменение порта отменено: настройте ListenStream в systemd socket override или отключите socket-активацию и повторите попытку."
+                return 1
+            fi
+            sshd_dropin="/etc/ssh/sshd_config.d/00-protection.conf"
             mkdir -p "$(dirname "$sshd_dropin")" || { red "Не удалось создать каталог drop-in SSH."; return 1; }
+            backup=""
+            existed="no"
+            ufw_rule_added="no"
             if [[ -f "$sshd_dropin" ]]; then
-                cp "$sshd_dropin" "$sshd_dropin.bak" || { red "Не удалось создать резервную копию SSH drop-in."; return 1; }
+                existed="yes"
+                backup=$(mktemp "$(dirname "$sshd_dropin")/.00-protection.XXXXXX") || { red "Не удалось создать резервную копию SSH drop-in."; return 1; }
+                cp -p -- "$sshd_dropin" "$backup" || { rm -f -- "$backup"; red "Не удалось создать резервную копию SSH drop-in."; return 1; }
             fi
 
             # Открываем новый порт в UFW до рестарта sshd (если UFW активен)
             if ${USE_SUDO:+$USE_SUDO }ufw status 2>/dev/null | grep -q 'Status: active'; then
+                if ! ufw_rule_exists "$NEW_SSH_PORT/tcp"; then
+                    ufw_rule_added="yes"
+                fi
                 if ! ufw_allow_port "$NEW_SSH_PORT" tcp; then
+                    [[ -n "$backup" ]] && rm -f -- "$backup"
                     red "Не удалось открыть порт $NEW_SSH_PORT/tcp в UFW. SSH-конфигурация не изменена."
                     return 1
                 fi
@@ -1564,29 +1590,38 @@ change_port_ssh() {
 
             if [[ -f "$sshd_dropin" ]]; then
                 if ! sed -i -E "/^[[:space:]]*Port[[:space:]]/d; 1iPort $NEW_SSH_PORT" "$sshd_dropin"; then
+                    restore_sshd_dropin "$sshd_dropin" "$backup" "$existed" || red "Требуется ручная проверка конфигурации SSH после неудачного отката."
+                    [[ "$ufw_rule_added" == "yes" ]] && echo "y" | ${USE_SUDO:+$USE_SUDO }ufw delete allow "$NEW_SSH_PORT/tcp" >/dev/null 2>&1
+                    [[ -n "$backup" ]] && rm -f -- "$backup"
                     red "Не удалось изменить порт SSH."
                     return 1
                 fi
             elif ! printf 'Port %s\n' "$NEW_SSH_PORT" > "$sshd_dropin"; then
+                rm -f -- "$sshd_dropin"
+                [[ "$ufw_rule_added" == "yes" ]] && echo "y" | ${USE_SUDO:+$USE_SUDO }ufw delete allow "$NEW_SSH_PORT/tcp" >/dev/null 2>&1
+                [[ -n "$backup" ]] && rm -f -- "$backup"
                 red "Не удалось изменить порт SSH."
                 return 1
             fi
 
-            # Перезапускаем SSH (для Ubuntu и Debian) с валидацией и авто-restore
-            ${USE_SUDO:+$USE_SUDO }systemctl daemon-reload 2>/dev/null
-            ${USE_SUDO:+$USE_SUDO }systemctl restart ssh.socket 2>/dev/null
+            # Перезапускаем SSH с проверкой конфигурации и авто-откатом.
             if ! validate_and_restart_sshd; then
                 red "Не удалось применить новый порт SSH. Проверьте конфигурацию вручную."
-                [[ -f "$sshd_dropin.bak" ]] && cp "$sshd_dropin.bak" "$sshd_dropin" || rm -f "$sshd_dropin"
-                validate_and_restart_sshd >/dev/null 2>&1
+                restore_sshd_dropin "$sshd_dropin" "$backup" "$existed" || red "Требуется ручная проверка конфигурации SSH после неудачного отката."
+                [[ "$ufw_rule_added" == "yes" ]] && echo "y" | ${USE_SUDO:+$USE_SUDO }ufw delete allow "$NEW_SSH_PORT/tcp" >/dev/null 2>&1
+                [[ -n "$backup" ]] && rm -f -- "$backup"
                 return 1
             fi
-            if [[ "$(get_ssh_port)" != "$NEW_SSH_PORT" ]]; then
+            local effective_ssh_ports
+            effective_ssh_ports=$(sshd -T 2>/dev/null | awk '$1 == "port" {print $2}')
+            if ! printf '%s\n' "$effective_ssh_ports" | grep -Fxq "$NEW_SSH_PORT" || ! port_in_use "$NEW_SSH_PORT"; then
                 red "Эффективный порт SSH не совпал с ожидаемым: $NEW_SSH_PORT."
-                [[ -f "$sshd_dropin.bak" ]] && cp "$sshd_dropin.bak" "$sshd_dropin" || rm -f "$sshd_dropin"
-                validate_and_restart_sshd >/dev/null 2>&1
+                restore_sshd_dropin "$sshd_dropin" "$backup" "$existed" || red "Требуется ручная проверка конфигурации SSH после неудачного отката."
+                [[ "$ufw_rule_added" == "yes" ]] && echo "y" | ${USE_SUDO:+$USE_SUDO }ufw delete allow "$NEW_SSH_PORT/tcp" >/dev/null 2>&1
+                [[ -n "$backup" ]] && rm -f -- "$backup"
                 return 1
             fi
+            [[ -n "$backup" ]] && rm -f -- "$backup"
 
             purple "Порт SSH изменен на $NEW_SSH_PORT."
             if [[ -f /etc/fail2ban/jail.local ]] && ! grep -qE "^port = $NEW_SSH_PORT$" /etc/fail2ban/jail.local; then
@@ -1627,7 +1662,8 @@ setup_ufw() {
         return 1
     fi
     
-    local CHECK_UFW=$(${USE_SUDO:+$USE_SUDO }ufw status 2>/dev/null)
+    local CHECK_UFW
+    CHECK_UFW=$(${USE_SUDO:+$USE_SUDO }ufw status 2>/dev/null)
     
     if [[ "$CHECK_UFW" == "Status: inactive" ]]; then
         if [[ "$(prompt_yes_no "Хотите включить и настроить ufw?" "no")" == "no" ]]; then
@@ -1635,17 +1671,7 @@ setup_ufw() {
             return
         fi
         
-        disable_ufw_if_active
-        yellow "ВНИМАНИЕ: ufw reset удалит ВСЕ существующие правила firewall."
-        ${USE_SUDO:+$USE_SUDO }ufw status 2>/dev/null
-        if [[ "$(prompt_yes_no "Все существующие правила будут удалены. Продолжить reset?" "no")" == "no" ]]; then
-            red "Сброс отменен, ufw не настроен."
-            return
-        fi
-        if ! echo "y" | ${USE_SUDO:+$USE_SUDO }ufw reset >/dev/null 2>&1; then
-            red "Ошибка при сбросе правил ufw (ufw reset)."
-            return 1
-        fi
+        yellow "Текущие правила UFW будут сохранены; необходимые правила добавятся к ним."
 
         # Получаем текущий порт SSH
         CURRENT_SSH_PORT=$(get_ssh_port)
@@ -1676,9 +1702,12 @@ setup_ufw() {
         fi
     else
         if [[ "$(prompt_yes_no "UFW включен, но не настроен, хотите выключить?" "no")" == "yes" ]]; then
-            echo "y" | ${USE_SUDO:+$USE_SUDO }ufw disable >/dev/null 2>&1
-            echo "y" | ${USE_SUDO:+$USE_SUDO }ufw reset >/dev/null 2>&1
-            purple "ufw отключен."
+            if echo "y" | ${USE_SUDO:+$USE_SUDO }ufw disable >/dev/null 2>&1; then
+                purple "ufw отключен; существующие правила сохранены."
+            else
+                red "Не удалось отключить ufw."
+                return 1
+            fi
         else
             red "ВНИМАНИЕ, ufw не настроен, рекомендуется отключить его."
         fi
@@ -1736,7 +1765,8 @@ ufw_menu() {
         return
     fi
     
-    local UFW_STATUS=$(${USE_SUDO:+$USE_SUDO }ufw status 2>/dev/null)
+    local UFW_STATUS
+    UFW_STATUS=$(${USE_SUDO:+$USE_SUDO }ufw status 2>/dev/null)
     if echo "$UFW_STATUS" | grep -q "Status: inactive"; then
             setup_ufw
         return
@@ -1746,6 +1776,7 @@ ufw_menu() {
     ensure_ufw_ports
     
     while true; do
+        # shellcheck disable=SC2034 # Массивы читаются select_menu по имени через nameref.
         local ufw_menu_labels=(
             "1. Показать статус"
             "2. Добавить порты TCP"
@@ -1755,6 +1786,7 @@ ufw_menu() {
             "6. Включить ufw"
             "0. Назад"
         )
+        # shellcheck disable=SC2034 # Массивы читаются select_menu по имени через nameref.
         local ufw_menu_values=(1 2 3 4 5 6 0)
         
         select_menu "Подменю управления Firewall UFW" ufw_menu_labels ufw_menu_values
@@ -1821,7 +1853,8 @@ ufw_menu() {
                 done
                 ;;
             4)
-                local UFW_RULES_RAW=$(${USE_SUDO:+$USE_SUDO }ufw status 2>/dev/null | grep -i " ALLOW " | awk '{print $1}')
+                local UFW_RULES_RAW
+                UFW_RULES_RAW=$(${USE_SUDO:+$USE_SUDO }ufw status 2>/dev/null | grep -i " ALLOW " | awk '{print $1}')
                 if [[ -z "$UFW_RULES_RAW" ]]; then
                     red "Нет правил для удаления."
                     continue
@@ -1845,8 +1878,11 @@ ufw_menu() {
                 ;;
             5)
                 if [[ "$(prompt_yes_no "Отключить ufw?" "no")" == "yes" ]]; then
-                    echo "y" | ${USE_SUDO:+$USE_SUDO }ufw disable >/dev/null 2>&1
-                    purple "ufw отключен."
+                    if echo "y" | ${USE_SUDO:+$USE_SUDO }ufw disable >/dev/null 2>&1; then
+                        purple "ufw отключен."
+                    else
+                        red "Не удалось отключить ufw."
+                    fi
                 fi
                 ;;
             6)
@@ -1936,6 +1972,8 @@ EOF
 
 # Установка и настройка fail2ban
 install_fail2ban() {
+    local jail_local="/etc/fail2ban/jail.local" jail_backup="" jail_existed="no"
+
     # Проверка наличия интернета
     if ! check_internet; then
         red "Нет подключения к интернету."
@@ -1981,33 +2019,51 @@ install_fail2ban() {
     # Получаем текущий SSH порт для конфигурации
     CURRENT_SSH_PORT=$(get_ssh_port)
     
-    # Резервная копия существующего jail.local (если есть)
-    if [[ -f /etc/fail2ban/jail.local ]]; then
-        ${USE_SUDO:+$USE_SUDO }cp /etc/fail2ban/jail.local /etc/fail2ban/jail.local.bak || { red "Не удалось создать резервную копию jail.local."; return 1; }
+    # Сохраняем исходное состояние во временную копию для отката этого запуска.
+    if [[ -f "$jail_local" ]]; then
+        jail_existed="yes"
+        jail_backup=$(mktemp "/etc/fail2ban/.jail.local.XXXXXX") || { red "Не удалось создать резервную копию jail.local."; return 1; }
+        if ! cp -p -- "$jail_local" "$jail_backup"; then
+            rm -f -- "$jail_backup"
+            red "Не удалось создать резервную копию jail.local."
+            return 1
+        fi
     fi
 
     # Создаем конфигурацию fail2ban
-    generate_fail2ban_config
+    if ! generate_fail2ban_config; then
+        if [[ "$jail_existed" == "yes" ]]; then cp -p -- "$jail_backup" "$jail_local"; else rm -f -- "$jail_local"; fi
+        [[ -n "$jail_backup" ]] && rm -f -- "$jail_backup"
+        red "Не удалось создать jail.local."
+        return 1
+    fi
 
     if ! ${USE_SUDO:+$USE_SUDO }fail2ban-client -t >/dev/null 2>&1; then
         red "Конфигурация fail2ban не прошла проверку. Восстанавливаем резервную копию."
-        if [[ -f /etc/fail2ban/jail.local.bak ]]; then
-            ${USE_SUDO:+$USE_SUDO }cp /etc/fail2ban/jail.local.bak /etc/fail2ban/jail.local
+        if [[ "$jail_existed" == "yes" ]]; then
+            cp -p -- "$jail_backup" "$jail_local"
         else
-            ${USE_SUDO:+$USE_SUDO }rm -f /etc/fail2ban/jail.local
+            rm -f -- "$jail_local"
         fi
+        [[ -n "$jail_backup" ]] && rm -f -- "$jail_backup"
         return 1
     fi
     
     if ! ${USE_SUDO:+$USE_SUDO }systemctl enable fail2ban ||
         ! ${USE_SUDO:+$USE_SUDO }systemctl start fail2ban; then
         red "Не удалось включить или запустить fail2ban."
+        if [[ "$jail_existed" == "yes" ]]; then cp -p -- "$jail_backup" "$jail_local"; else rm -f -- "$jail_local"; fi
+        [[ -n "$jail_backup" ]] && rm -f -- "$jail_backup"
         return 1
     fi
     if ! ${USE_SUDO:+$USE_SUDO }systemctl restart fail2ban; then
         red "Ошибка: fail2ban не запустился. Проверьте /etc/fail2ban/jail.local и журнал: journalctl -u fail2ban"
+        if [[ "$jail_existed" == "yes" ]]; then cp -p -- "$jail_backup" "$jail_local"; else rm -f -- "$jail_local"; fi
+        ${USE_SUDO:+$USE_SUDO }systemctl restart fail2ban >/dev/null 2>&1
+        [[ -n "$jail_backup" ]] && rm -f -- "$jail_backup"
         return 1
     fi
+    [[ -n "$jail_backup" ]] && rm -f -- "$jail_backup"
     if ! ${USE_SUDO:+$USE_SUDO }fail2ban-client status sshd &>/dev/null; then
         yellow "Внимание: jail sshd не активен — проверьте, что существует /var/log/auth.log (на минимальных Ubuntu 22.04+ он может отсутствовать)."
     fi
@@ -2138,6 +2194,7 @@ fail2ban_menu() {
     fi
     
     while true; do
+        # shellcheck disable=SC2034 # Массивы читаются select_menu по имени через nameref.
         local fb_menu_labels=(
             "1. Показать статус Fail2ban"
             "2. Показать все активные jail"
@@ -2151,6 +2208,7 @@ fail2ban_menu() {
             "10. Редактировать jail.local (nano)"
             "0. Назад"
         )
+        # shellcheck disable=SC2034 # Массивы читаются select_menu по имени через nameref.
         local fb_menu_values=(1 2 3 4 5 6 7 8 9 10 0)
 
         select_menu "Подменю управления Fail2ban" fb_menu_labels fb_menu_values
@@ -2173,7 +2231,8 @@ fail2ban_menu() {
                     done
                     for j in $FB_JAILS; do
                         echo "------- Jail: $j -------"
-                        local fb_status=$(${USE_SUDO:+$USE_SUDO }fail2ban-client status "$j" 2>/dev/null)
+                        local fb_status
+                        fb_status=$(${USE_SUDO:+$USE_SUDO }fail2ban-client status "$j" 2>/dev/null)
                         echo "$fb_status"
                     done
                 fi
@@ -2187,8 +2246,9 @@ fail2ban_menu() {
                     done
                     for j in $FB_JAILS; do
                         echo "------- Jail: $j -------"
-                        local fb_out=$(${USE_SUDO:+$USE_SUDO }fail2ban-client status "$j" 2>/dev/null)
-                        local banned_list=$(echo "$fb_out" | grep -i "Banned IP list" | awk -F':' '{print $2}' | xargs)
+                        local fb_out banned_list
+                        fb_out=$(${USE_SUDO:+$USE_SUDO }fail2ban-client status "$j" 2>/dev/null)
+                        banned_list=$(echo "$fb_out" | grep -i "Banned IP list" | awk -F':' '{print $2}' | xargs)
                         if [[ -z "$banned_list" ]]; then
                             yellow "Забаненных IP в jail $j нет."
                         else
@@ -2202,11 +2262,12 @@ fail2ban_menu() {
                     local banned_ips_map=() banned_ips_labels=() banned_ips_values=()
                     local j
                     for j in $FB_JAILS; do
-                        local fb_out=$(${USE_SUDO:+$USE_SUDO }fail2ban-client status "$j" 2>/dev/null)
-                        local banned_list=$(echo "$fb_out" | grep -i "Banned IP list" | awk -F':' '{print $2}' | xargs)
+                        local fb_out banned_list
+                        fb_out=$(${USE_SUDO:+$USE_SUDO }fail2ban-client status "$j" 2>/dev/null)
+                        banned_list=$(echo "$fb_out" | grep -i "Banned IP list" | awk -F':' '{print $2}' | xargs)
                         local ip
                         for ip in $banned_list; do
-                            [[ " ${banned_ips_map[*]} " =~ " $ip " ]] || banned_ips_map+=("$ip")
+                            [[ " ${banned_ips_map[*]} " =~ $ip ]] || banned_ips_map+=("$ip")
                         done
                     done
                     if [[ ${#banned_ips_map[@]} -eq 0 ]]; then
@@ -2279,6 +2340,7 @@ fail2ban_menu() {
 
 docker_menu() {
     while true; do
+        # shellcheck disable=SC2034 # Массивы читаются select_menu по имени через nameref.
         local docker_menu_labels=(
             "1. Установить Docker"
             "2. Обновить Docker"
@@ -2296,6 +2358,7 @@ docker_menu() {
             "14. Полное удаление Docker"
             "0. Назад"
         )
+        # shellcheck disable=SC2034 # Массивы читаются select_menu по имени через nameref.
         local docker_menu_values=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 0)
         local docker_version="не установлен"
         local compose_version="не установлен"
@@ -2476,8 +2539,7 @@ docker_menu() {
                         if [[ -z "$DOCKER_NAME" ]]; then
                             red "Имя контейнера не указано."
                         else
-                            docker restart "$DOCKER_NAME" 2>/dev/null
-                            if [[ $? -eq 0 ]]; then
+                            if docker restart "$DOCKER_NAME" 2>/dev/null; then
                                 purple "Контейнер $DOCKER_NAME перезапущен."
                             else
                                 red "Не удалось перезапустить контейнер $DOCKER_NAME."
@@ -2617,6 +2679,7 @@ add_user_to_docker() {
 
 # Установка Docker
 install_docker() {
+    local installer_file
 
     # Проверка наличия интернета
     if ! check_internet; then
@@ -2670,10 +2733,24 @@ install_docker() {
             green "curl недоступен, используем wget для установки Docker..."
             yellow "ВНИМАНИЕ: Следующая команда скачает и запустит скрипт с get.docker.com."
             yellow "Убедитесь, что вы доверяете источнику, перед продолжением."
-            if ! wget -qO- https://get.docker.com | sh; then
+            if [[ "$(prompt_yes_no "Загрузить и выполнить установщик Docker от get.docker.com?" "no")" == "no" ]]; then
+                return
+            fi
+            if ! installer_file=$(mktemp); then
+                red "Не удалось создать временный файл для установщика Docker."
+                return 1
+            fi
+            if ! wget -q -O "$installer_file" https://get.docker.com || [[ ! -s "$installer_file" ]]; then
+                rm -f -- "$installer_file"
+                red "Не удалось загрузить установщик Docker."
+                return 1
+            fi
+            if ! sh "$installer_file"; then
+                rm -f -- "$installer_file"
                 red "Ошибка при установке Docker через wget."
                 return 1
             fi
+            rm -f -- "$installer_file"
             return
         fi
     fi
@@ -2682,11 +2759,25 @@ install_docker() {
     green "Устанавливаем Docker..."
     yellow "ВНИМАНИЕ: Следующая команда скачает и запустит скрипт с get.docker.com."
     yellow "Убедитесь, что вы доверяете источнику, перед продолжением."
+    if [[ "$(prompt_yes_no "Загрузить и выполнить установщик Docker от get.docker.com?" "no")" == "no" ]]; then
+        return
+    fi
     ${USE_SUDO:+$USE_SUDO }apt-get update
-    if ! curl -fsSL https://get.docker.com | sh; then
+    if ! installer_file=$(mktemp); then
+        red "Не удалось создать временный файл для установщика Docker."
+        return 1
+    fi
+    if ! curl -fsSL -o "$installer_file" https://get.docker.com || [[ ! -s "$installer_file" ]]; then
+        rm -f -- "$installer_file"
+        red "Не удалось загрузить установщик Docker."
+        return 1
+    fi
+    if ! sh "$installer_file"; then
+        rm -f -- "$installer_file"
         red "Ошибка при установке Docker через curl."
         return 1
     fi
+    rm -f -- "$installer_file"
 
     # Проверяем установку
     if docker --version &>/dev/null; then
@@ -2713,7 +2804,7 @@ install_docker() {
 # Функция создания нового пользователя с интерактивным выбором параметров
 new_user() {
     local target_groups=""
-    local recommended_password=""
+    local password password_confirm
     
     # Определяем группы в зависимости от наличия sudo
     if [[ -n "$USE_SUDO" ]]; then
@@ -2731,7 +2822,8 @@ new_user() {
         
         # Выбор имени пользователя
         while true; do
-            local recommended_username=$(head -c 64 /dev/urandom | tr -dc a-z | head -c 1; head -c 64 /dev/urandom | tr -dc a-z0-9 | head -c 7)
+            local recommended_username
+            recommended_username=$(head -c 64 /dev/urandom | tr -dc '[:lower:]' | head -c 1; head -c 64 /dev/urandom | tr -dc '[:lower:][:digit:]' | head -c 7)
             
             if [[ "$(prompt_yes_no "Рекомендуемое имя пользователя $recommended_username, оставить?" "yes")" == "yes" ]]; then
                 username=$recommended_username
@@ -2771,31 +2863,23 @@ new_user() {
         else
             # Создание нового пользователя
             while true; do
-                # Генерируем пароль, проходящий validate_password (все классы символов)
-                local recommended_password
-                while true; do
-                    recommended_password=$(head -c 96 /dev/urandom | tr -dc A-Za-z0-9 | head -c 16)
-                    validate_password "$recommended_password" && break
-                done
-                
-                if [[ "$(prompt_yes_no "Рекомендуемый пароль пользователя $recommended_password, оставить?" "yes")" == "yes" ]]; then
-                    password=$recommended_password
-                else
-                    read -rs -p "Введите пароль для пользователя $username: " password
-                    echo
-                    
-                    if ! validate_password "$password"; then
-                        continue
-                    fi
-                    
-                    read -rs -p "Повторите пароль для пользователя $username: " password_confirm
-                    echo
-                    
-                    if [[ "$password" != "$password_confirm" ]]; then
-                        red "Пароли не совпадают. Попробуйте снова."
-                        continue
-                    fi
+                read -rs -p "Введите пароль для пользователя $username: " password
+                echo
+
+                if ! validate_password "$password"; then
+                    unset password
+                    continue
                 fi
+
+                read -rs -p "Повторите пароль для пользователя $username: " password_confirm
+                echo
+
+                if [[ "$password" != "$password_confirm" ]]; then
+                    red "Пароли не совпадают. Попробуйте снова."
+                    unset password password_confirm
+                    continue
+                fi
+                unset password_confirm
                 break
             done
             
@@ -2805,6 +2889,7 @@ new_user() {
             fi
             
             create_user "$username" "$password" "$nopass" "$target_groups"
+            unset password
         fi
     done
 }
@@ -2813,24 +2898,24 @@ new_user() {
 # ВЫВОД ИНФОРМАЦИИ В ФАЙЛ
 # ============================================================
 
-# Функция для сохранения всех настроек в файл
+# Сохранение несекретных параметров; пароли намеренно не записываются на диск.
 out_file() {
-    ( umask 077; : > "$INFO_FILE" ) 2>/dev/null
-    chmod 600 "$INFO_FILE" 2>/dev/null
-    {
-        echo ""
+    local temp_file
+    if ! temp_file=$(mktemp "${INFO_FILE}.XXXXXX"); then
+        red "Не удалось создать временный файл параметров $INFO_FILE."
+        return 1
+    fi
+    if ! {
+        printf '\n'
         CURRENT_SSH_PORT=$(get_ssh_port)
-        [[ -n "$ROOT_PASSWORD" ]] && echo "Пароль root = $ROOT_PASSWORD"
-        [[ -n "$CURRENT_SSH_PORT" ]] && echo "Порт SSH = $CURRENT_SSH_PORT"
-        [[ -n "$username" ]] && echo "Новый пользователь = $username"
-        [[ -n "$password" ]] && echo "Пароль нового пользователя = $password"
-        if [[ -n "$ROOT_PASSWORD" || -n "$password" ]]; then
-            echo ""
-            echo "ВНИМАНИЕ: Данный файл содержит пароли в открытом виде!"
-            echo "Рекомендуется удалить файл $INFO_FILE после сохранения паролей в безопасном месте."
-        fi
-        echo ""
-    } >> "$INFO_FILE"
+        [[ -n "$CURRENT_SSH_PORT" ]] && printf 'Порт SSH = %s\n' "$CURRENT_SSH_PORT"
+        [[ -n "$username" ]] && printf 'Новый пользователь = %s\n' "$username"
+        printf '\n'
+    } > "$temp_file" || ! chmod 600 "$temp_file" || ! mv -f -- "$temp_file" "$INFO_FILE"; then
+        rm -f -- "$temp_file"
+        red "Не удалось безопасно сохранить параметры в $INFO_FILE."
+        return 1
+    fi
 }
 
 
@@ -2891,6 +2976,7 @@ show_help() {
 # Главное меню скрипта
 main() {
     while true; do
+        # shellcheck disable=SC2034 # Массивы читаются select_menu по имени через nameref.
         local main_menu_labels=(
             "1. Обновить пакеты"
             "2. Поменять пароль ROOT"
@@ -2906,6 +2992,7 @@ main() {
             "12. Справка"
             "0. Выйти"
         )
+        # shellcheck disable=SC2034 # Массивы читаются select_menu по имени через nameref.
         local main_menu_values=(1 2 3 4 5 6 7 8 9 10 11 12 0)
         
         select_menu "Основное меню | protection v${PROTECTION_VERSION}" main_menu_labels main_menu_values

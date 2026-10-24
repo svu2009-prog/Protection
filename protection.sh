@@ -15,7 +15,7 @@ CURRENT_SSH_PORT=""
 username=""
 password=""
 USE_SUDO=""
-PROTECTION_VERSION="1.3.6"
+PROTECTION_VERSION="1.3.7"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 
 # ============================================================
@@ -191,7 +191,7 @@ esac
 render_menu() {
     local title=$1 selected=$2 labels_name=$3 redraw=${4:-0}
     local -n labels_ref=$labels_name
-    local menu_lines=$((${#labels_ref[@]} + 3))
+    local menu_lines=$((${#labels_ref[@]} + 4))
     
     [[ -n "$title" ]] && menu_lines=$((menu_lines + 1))
     

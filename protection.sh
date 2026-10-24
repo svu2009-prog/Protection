@@ -15,7 +15,7 @@ CURRENT_SSH_PORT=""
 username=""
 password=""
 USE_SUDO=""
-PROTECTION_VERSION="1.3.5"
+PROTECTION_VERSION="1.3.6"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 
 # ============================================================
@@ -448,7 +448,7 @@ install_sudo_package() {
     fi
 
     green "Устанавливаем sudo..."
-    if apt update -y && apt install sudo -y; then
+    if ${USE_SUDO:+$USE_SUDO }apt update -y && ${USE_SUDO:+$USE_SUDO }apt install sudo -y; then
         if command -v sudo &>/dev/null; then
             purple "sudo успешно установлен."
         else
@@ -835,7 +835,7 @@ ensure_ipv6_module() {
             fi
         fi
         green "Устанавливаем kmod (modprobe)..."
-        if apt update -y && apt install -yq kmod; then
+        if ${USE_SUDO:+$USE_SUDO }apt update -y && ${USE_SUDO:+$USE_SUDO }apt install -yq kmod; then
             if command -v modprobe &>/dev/null; then
                 purple "kmod успешно установлен."
             else
@@ -1944,7 +1944,7 @@ install_fail2ban() {
         fi
     fi
 
-    if ! apt update -y; then
+    if ! ${USE_SUDO:+$USE_SUDO }apt update -y; then
         red "Не удалось обновить индекс пакетов."
         return 1
     fi
@@ -1956,7 +1956,7 @@ install_fail2ban() {
             red "Не удалось установить nftables."
             return 1
         fi
-        if systemctl enable nftables 2>/dev/null && systemctl start nftables 2>/dev/null; then
+        if ${USE_SUDO:+$USE_SUDO }systemctl enable nftables 2>/dev/null && ${USE_SUDO:+$USE_SUDO }systemctl start nftables 2>/dev/null; then
             purple "nftables успешно установлен и запущен."
         else
             yellow "nftables установлен, но не удалось включить/запустить службу. Проверьте вручную."
@@ -1966,7 +1966,7 @@ install_fail2ban() {
     fi
     
     # Устанавливаем fail2ban
-    if ! apt install -yq fail2ban || ! command -v fail2ban-client >/dev/null 2>&1; then
+    if ! ${USE_SUDO:+$USE_SUDO }apt install -yq fail2ban || ! command -v fail2ban-client >/dev/null 2>&1; then
         red "Не удалось установить fail2ban."
         return 1
     fi
@@ -2656,15 +2656,15 @@ install_docker() {
     fi
     if ! command -v curl &>/dev/null; then
         green "Устанавливаем curl..."
-        apt-get update
-        apt-get install -y curl
+        ${USE_SUDO:+$USE_SUDO }apt-get update
+        ${USE_SUDO:+$USE_SUDO }apt-get install -y curl
     fi
     
     if ! command -v curl &>/dev/null; then
         if ! command -v wget &>/dev/null; then
             green "Устанавливаем wget..."
-            apt-get update
-            apt-get install -y wget
+            ${USE_SUDO:+$USE_SUDO }apt-get update
+            ${USE_SUDO:+$USE_SUDO }apt-get install -y wget
         fi
         if command -v wget &>/dev/null; then
             green "curl недоступен, используем wget для установки Docker..."
@@ -2682,7 +2682,7 @@ install_docker() {
     green "Устанавливаем Docker..."
     yellow "ВНИМАНИЕ: Следующая команда скачает и запустит скрипт с get.docker.com."
     yellow "Убедитесь, что вы доверяете источнику, перед продолжением."
-    apt-get update
+    ${USE_SUDO:+$USE_SUDO }apt-get update
     if ! curl -fsSL https://get.docker.com | sh; then
         red "Ошибка при установке Docker через curl."
         return 1
@@ -2917,7 +2917,7 @@ main() {
                 break
                 ;;
             1)
-                apt update && apt upgrade -y && apt autoremove -y && apt clean
+                ${USE_SUDO:+$USE_SUDO }apt update && ${USE_SUDO:+$USE_SUDO }apt upgrade -y && ${USE_SUDO:+$USE_SUDO }apt autoremove -y && ${USE_SUDO:+$USE_SUDO }apt clean
                 ;;
             2)
                 change_root_pass

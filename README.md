@@ -49,18 +49,18 @@ sudo ./protection.sh
 После первого запуска можно использовать:
 
 ```bash
-protection
+sudo protection
 ```
 
 Проверить версию:
 
 ```bash
-protection --version
+sudo protection --version
 ```
 
 ## Главное меню
 
-Основное меню открывается при запуске `protection` или `./protection.sh` и содержит:
+Основное меню открывается при запуске `sudo protection` или `sudo ./protection.sh` и содержит:
 
 1. Обновить пакеты;
 2. Поменять пароль `root`;

@@ -10,7 +10,7 @@ set -o pipefail
 # Переменные
 username=""
 USE_SUDO=""
-PROTECTION_VERSION="1.4.1"
+PROTECTION_VERSION="1.5.0"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 
 # ============================================================
@@ -1289,22 +1289,8 @@ has_alternative_ssh_access() {
     return 1
 }
 
-setup_ssh_keys() {
-    if ! select_non_system_user manual; then
-        return
-    fi
-    username="$SELECTED_USER"
-
-    # Домашний каталог берём из passwd, а не хардкодим /home/user
-    # (root и пользователи с нестандартным home получают корректный путь)
-    local user_home
-    user_home="$(getent passwd "$username" | cut -d: -f6)"
-    if [[ -z "$user_home" ]]; then
-        red "Не удалось определить домашний каталог пользователя $username."
-        return 1
-    fi
-    
-    # Проверка и создание директории .ssh
+_prepare_ssh_dir() {
+    local username="$1" user_home="$2"
     if [[ ! -d "$user_home/.ssh" ]]; then
         if ! ${USE_SUDO:+$USE_SUDO }mkdir -p "$user_home/.ssh" ||
             ! ${USE_SUDO:+$USE_SUDO }chown "$username:$username" "$user_home/.ssh" ||
@@ -1317,43 +1303,105 @@ setup_ssh_keys() {
         red "Не удалось проверить права каталога .ssh для пользователя $username."
         return 1
     fi
-    
-    # Инструкции для пользователя
-    red "Прежде чем продолжить, выполните следующие действия:"
-    yellow "1. Запустите на компьютере с Windows программу: powershell.exe"
-    yellow "2. Проверьте, что в папке пользователя есть папка .ssh. Если её нет, создайте её и скопируйте путь до неё."
-    yellow "3. В PowerShell введите команду: cd путь_к_папке_ssh"
-    yellow "4. Далее скопируйте и вставьте в PowerShell команду:"
-    yellow "   - ssh-keygen -t ed25519 -C \"Комментарий\" -f Имя_файла -N Пароль"
-    yellow "5. Введите команду: cat имя_файла.pub и скопируйте содержимое ключа."
-    yellow "6. Вставьте это в открытом редакторе nano на сервере, сохраните и закройте редактор (Ctrl+X, Y, Enter)."
-    echo
-    
-    # Ожидание подтверждения пользователя
-    read -r -p "Если выполнили все действия до номера 5 включительно, нажмите ENTER: "
-    
-    # Открытие файла authorized_keys для редактирования
+}
+
+_add_ssh_key_flow() {
+    local username="$1" user_home="$2" mode="$3"
+
+    if ! _prepare_ssh_dir "$username" "$user_home"; then
+        return 1
+    fi
+
     if ! command -v nano &>/dev/null; then
         red "nano не установлен. Установите его: apt install nano"
-        return
+        return 1
     fi
+
+    red "Прежде чем продолжить, выполните следующие действия на своём компьютере:"
+    if [[ "$mode" == "new" ]]; then
+        yellow "1. Откройте PowerShell."
+        yellow "2. Перейдите в папку .ssh: cd ~\\.ssh  (если папки нет — создайте: mkdir ~\\.ssh)"
+        yellow "3. Сгенерируйте ключ:"
+        yellow "   ssh-keygen -t ed25519 -C \"Комментарий\" -f Имя_файла -N Пароль"
+        yellow "4. Скопируйте содержимое публичного ключа:"
+        yellow "   cat ~\\.ssh\\Имя_файла.pub"
+        yellow "5. Вставьте скопированное в редактор nano, который сейчас откроется."
+        yellow "   Сохраните и закройте редактор: Ctrl+X, Y, Enter."
+        echo
+        read -r -p "Если выполнили шаги 1–4, нажмите ENTER для открытия редактора: "
+    else
+        yellow "1. Откройте PowerShell."
+        yellow "2. Найдите нужный .pub файл в папке .ssh:"
+        yellow "   ls ~\\.ssh\\*.pub"
+        yellow "3. Скопируйте содержимое нужного ключа:"
+        yellow "   cat ~\\.ssh\\Имя_файла.pub"
+        yellow "4. Вставьте скопированное в редактор nano, который сейчас откроется."
+        yellow "   Сохраните и закройте редактор: Ctrl+X, Y, Enter."
+        echo
+        read -r -p "Если скопировали содержимое ключа, нажмите ENTER для открытия редактора: "
+    fi
+
     if ! ${USE_SUDO:+$USE_SUDO }nano "$user_home/.ssh/authorized_keys"; then
         red "Редактор nano завершился с ошибкой."
         return 1
     fi
 
-    # Установка прав доступа
     if [[ ! -s "$user_home/.ssh/authorized_keys" ]] ||
         ! ${USE_SUDO:+$USE_SUDO }chown -R "$username:$username" "$user_home/.ssh" ||
         ! ${USE_SUDO:+$USE_SUDO }chmod 600 "$user_home/.ssh/authorized_keys"; then
         red "Не удалось проверить или установить права SSH-ключей для пользователя $username."
         return 1
     fi
+
     if ! validate_and_restart_sshd; then
         return 1
     fi
-    
+
     green "Настройка SSH-ключей для пользователя $username завершена."
+}
+
+setup_ssh_keys() {
+    local ssh_labels=() ssh_values=()
+    ssh_labels=(
+        "1. Добавить новый ключ пользователю"
+        "2. Использовать существующий ключ для пользователя"
+        "3. Добавить новый ключ для root"
+        "4. Использовать существующий ключ для root"
+        "0. Назад"
+    )
+    ssh_values=(1 2 3 4 0)
+
+    select_menu "Настройка SSH-ключей" ssh_labels ssh_values
+    local choice="$MENU_CHOICE"
+
+    if [[ "$choice" == "0" ]]; then
+        return
+    fi
+
+    local username user_home mode
+
+    if [[ "$choice" == "3" || "$choice" == "4" ]]; then
+        username="root"
+    else
+        if ! select_non_system_user manual; then
+            return
+        fi
+        username="$SELECTED_USER"
+    fi
+
+    user_home="$(getent passwd "$username" | cut -d: -f6)"
+    if [[ -z "$user_home" ]]; then
+        red "Не удалось определить домашний каталог пользователя $username."
+        return 1
+    fi
+
+    if [[ "$choice" == "1" || "$choice" == "3" ]]; then
+        mode="new"
+    else
+        mode="existing"
+    fi
+
+    _add_ssh_key_flow "$username" "$user_home" "$mode"
 }
 
 # ============================================================

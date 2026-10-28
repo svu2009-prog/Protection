@@ -2649,6 +2649,8 @@ install_docker() {
         
         # Проверяем наличие пользователей в группе docker
         if ! [[ -n "$(getent group docker 2>/dev/null | cut -d: -f4)" ]]; then
+            yellow "Внимание: нет пользователей в группе docker."
+            if [[ "$(prompt_yes_no "Добавить существующего пользователя в группу docker?" "no")" == "yes" ]]; then
                 select_non_system_user "" create && [[ -n "$SELECTED_USER" ]] && add_user_to_docker "$SELECTED_USER"
             elif [[ "$(prompt_yes_no "Создать нового пользователя и добавить в группы sudo и docker?" "no")" == "yes" ]]; then
                 new_user docker

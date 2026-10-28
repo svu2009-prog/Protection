@@ -8,12 +8,9 @@ set -o pipefail
 # ============================================================
 
 # Переменные
-ROOT_SSH_STATUS=""
-PING_STATUS=""
-CURRENT_SSH_PORT=""
 username=""
 USE_SUDO=""
-PROTECTION_VERSION="1.3.9"
+PROTECTION_VERSION="1.4.0"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 
 # ============================================================
@@ -25,7 +22,6 @@ INFO_FILE="/root/info.txt"
 F2B_BANTIME_DEFAULT=3600
 F2B_FINDTIME_DEFAULT=2400
 F2B_MAXRETRY_DEFAULT=3
-F2B_SSHD_BANTIME=3600
 F2B_RECIDIVE_BANTIME=604800
 F2B_RECIDIVE_FINDTIME=172800
 F2B_RECIDIVE_MAXRETRY=2
@@ -99,8 +95,12 @@ compare_versions() {
 }
 
 get_script_version() {
-    local script_file=$1
-    grep -m1 '^PROTECTION_VERSION=' "$script_file" 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d '\r'
+    local script_file=$1 line ver
+    line=$(grep -m1 '^PROTECTION_VERSION=' "$script_file" 2>/dev/null) || return 1
+    ver="${line#*=}"
+    ver="${ver//\"/}"
+    ver="${ver//$'\r'/}"
+    echo "$ver"
 }
 
 ensure_global_command() {
@@ -317,14 +317,6 @@ select_menu() {
                         ((selected++))
                         [[ "$selected" -ge ${#labels_ref[@]} ]] && selected=0
                         ;;
-                    "[C")
-                        ((selected++))
-                        [[ "$selected" -ge ${#labels_ref[@]} ]] && selected=0
-                        ;;
-                    "[D")
-                        ((selected--))
-                        [[ "$selected" -lt 0 ]] && selected=$((${#labels_ref[@]} - 1))
-                        ;;
                     *)
                         if [[ "$zero_value_index" -ge 0 ]]; then
                             MENU_CHOICE="0"
@@ -383,7 +375,7 @@ check_internet() {
 port_in_use() {
     local port=$1
     if command -v ss &>/dev/null; then
-        ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE ":$port\$"
+        ss -ltn "sport = :$port" 2>/dev/null | grep -q ":$port"
         return $?
     fi
     if command -v netstat &>/dev/null; then
@@ -475,10 +467,6 @@ validate_port() {
 }
 
 # Проверка порта SSH (диапазон 1024-65535)
-validate_ssh_port() {
-    validate_port "$1" 1024 65535
-}
-
 # Получение текущего порта SSH из конфигурации
 get_ssh_port() {
     local port
@@ -935,15 +923,6 @@ ipv6_interfaces_have_value() {
 }
 
 # Проверка статуса отключения IPv6.
-ipv6_is_disabled() {
-    ipv6_interfaces_have_value 1
-}
-
-# Проверка статуса включения IPv6.
-ipv6_is_enabled() {
-    ipv6_interfaces_have_value 0
-}
-
 # Диагностика при неудачном применении настроек IPv6
 ipv6_diagnostics() {
     yellow "Диагностика:"
@@ -987,7 +966,7 @@ disable_ipv6() {
 
 
     # Если IPv6 уже отключен
-    if ipv6_is_disabled; then
+    if ipv6_interfaces_have_value 1; then
         green "IPv6 уже отключен во всех интерфейсах."
 
         if [[ "$(prompt_yes_no "Хотите включить IPv6?" "no")" == "yes" ]]; then
@@ -1000,19 +979,19 @@ disable_ipv6() {
             fi
 
             # Повторное применение через sysctl -p/--system (как при ручной настройке)
-            if ! ipv6_is_enabled; then
+            if ! ipv6_interfaces_have_value 0; then
                 green "Повторное применение настроек через sysctl -p и sysctl --system..."
                 ${USE_SUDO:+$USE_SUDO }sysctl -p /etc/sysctl.d/99-protection.conf >/dev/null 2>&1
                 ${USE_SUDO:+$USE_SUDO }sysctl --system >/dev/null 2>&1
             fi
 
             # Прямая запись в каждый существующий интерфейс
-            if ! ipv6_is_enabled; then
+            if ! ipv6_interfaces_have_value 0; then
                 green "Прямая запись disable_ipv6=0 в интерфейсы..."
                 ipv6_set_all_interfaces 0
             fi
 
-            if ipv6_is_enabled; then
+            if ipv6_interfaces_have_value 0; then
                 ensure_ipv6_module_autoload
                 purple "IPv6 успешно включен."
             else
@@ -1037,7 +1016,7 @@ disable_ipv6() {
     fi
 
     # Повторное применение через sysctl -p/--system (как при ручной настройке)
-    if ! ipv6_is_disabled; then
+    if ! ipv6_interfaces_have_value 1; then
         green "Повторное применение настроек через sysctl -p и sysctl --system..."
         ${USE_SUDO:+$USE_SUDO }sysctl -p /etc/sysctl.d/99-protection.conf >/dev/null 2>&1
         ${USE_SUDO:+$USE_SUDO }sysctl --system >/dev/null 2>&1
@@ -1045,13 +1024,13 @@ disable_ipv6() {
 
     # Прямая запись в каждый существующий интерфейс (all/default не всегда
     # затрагивают уже поднятые интерфейсы)
-    if ! ipv6_is_disabled; then
+    if ! ipv6_interfaces_have_value 1; then
         green "Прямая запись disable_ipv6=1 в интерфейсы..."
         ipv6_set_all_interfaces 1
     fi
 
     # Проверяем, что IPv6 отключен
-    if ipv6_is_disabled; then
+    if ipv6_interfaces_have_value 1; then
         ensure_ipv6_module_autoload
         purple "IPv6 успешно отключен во всех интерфейсах."
         green "Рекомендуется перезагрузить систему для полного применения изменений."
@@ -1391,16 +1370,9 @@ create_user() {
     green "Пользователь: $username"
     
     # Создаем пользователя с указанными группами
-    if [[ -n "$groups" ]]; then
-        if ! useradd -m "$username" -G "$groups" -s /bin/bash; then
-            red "Ошибка при создании пользователя $username."
-            return 1
-        fi
-    else
-        if ! useradd -m "$username" -s /bin/bash; then
-            red "Ошибка при создании пользователя $username."
-            return 1
-        fi
+    if ! useradd -m "$username" ${groups:+-G "$groups"} -s /bin/bash; then
+        red "Ошибка при создании пользователя $username."
+        return 1
     fi
     
     # Устанавливаем пароль
@@ -1432,6 +1404,7 @@ create_user() {
 
 # Функция для отключения/включения ICMP ping
 disable_ping() {
+    local PING_STATUS
     # Фактическое значение ядра (учитывает и sysctl.conf, и дроп-ины)
     PING_STATUS=$(sysctl -n net.ipv4.icmp_echo_ignore_all 2>/dev/null)
 
@@ -1498,6 +1471,7 @@ set_permit_root_login() {
 
 # Отключение/включение входа root по SSH
 disable_root_ssh() {
+    local ROOT_SSH_STATUS
     # Определяем текущее значение PermitRootLogin (учитывает Include sshd_config.d)
     ROOT_SSH_STATUS=$(sshd -T 2>/dev/null | awk '/^permitrootlogin/ {print $2; exit}')
     if [[ -z "$ROOT_SSH_STATUS" ]]; then
@@ -1546,7 +1520,7 @@ disable_root_ssh() {
 
 # Изменение порта SSH
 change_port_ssh() {
-    local NEW_SSH_PORT sshd_dropin backup existed ufw_rule_added
+    local NEW_SSH_PORT sshd_dropin backup existed ufw_rule_added CURRENT_SSH_PORT
     CURRENT_SSH_PORT=$(get_ssh_port)
     
     if [[ "$(prompt_yes_no "Порт SSH = $CURRENT_SSH_PORT, хотите изменить его?" "no")" == "no" ]]; then
@@ -1556,7 +1530,7 @@ change_port_ssh() {
     while true; do
         read -r -p 'Введите новый порт SSH (от 1024 до 65535): ' NEW_SSH_PORT
         
-        if validate_ssh_port "$NEW_SSH_PORT"; then
+        if validate_port "$NEW_SSH_PORT" 1024 65535; then
             if port_in_use "$NEW_SSH_PORT"; then
                 red "Порт $NEW_SSH_PORT уже занят. Выберите другой."
                 continue
@@ -1641,6 +1615,7 @@ change_port_ssh() {
 
 # Настройка UFW файрвола
 setup_ufw() {
+    local CURRENT_SSH_PORT
     # Проверка наличия интернета
     if ! check_internet; then
         red "Нет подключения к интернету."
@@ -1729,6 +1704,7 @@ ufw_rule_exists() {
 
 # Проверка и добавление портов, которые настраивает скрипт
 ensure_ufw_ports() {
+    local CURRENT_SSH_PORT
     # Получаем текущий порт SSH
     CURRENT_SSH_PORT=$(get_ssh_port)
     
@@ -1759,6 +1735,7 @@ ensure_ufw_ports() {
 
 # Подменю управления UFW
 ufw_menu() {
+    local CURRENT_SSH_PORT
     # Если ufw не установлен или не активен — выполняем стандартную установку/настройку
     if ! dpkg-query -W -f='${Status}' ufw 2>/dev/null | grep -q "install ok installed"; then
             setup_ufw
@@ -1929,6 +1906,7 @@ ufw_menu() {
 
 # Создание /etc/fail2ban/jail.local с настройками по умолчанию
 generate_fail2ban_config() {
+    local CURRENT_SSH_PORT
     # Получаем текущий SSH порт для конфигурации
     CURRENT_SSH_PORT=$(get_ssh_port)
 
@@ -1955,7 +1933,7 @@ logpath = /var/log/auth.log
 backend = polling
 maxretry = 3
 findtime = $F2B_FINDTIME_DEFAULT
-bantime = $F2B_SSHD_BANTIME
+bantime = $F2B_BANTIME_DEFAULT
 
 [recidive]
 enabled = true
@@ -1972,7 +1950,7 @@ EOF
 
 # Установка и настройка fail2ban
 install_fail2ban() {
-    local jail_local="/etc/fail2ban/jail.local" jail_backup="" jail_existed="no"
+    local jail_local="/etc/fail2ban/jail.local" jail_backup="" jail_existed="no" CURRENT_SSH_PORT
 
     # Проверка наличия интернета
     if ! check_internet; then
@@ -2338,6 +2316,12 @@ fail2ban_menu() {
 # ДОПОЛНИТЕЛЬНОЕ МЕНЮ DOCKER
 # ============================================================
 
+_require_docker() {
+    command -v docker &>/dev/null && return 0
+    red "Docker не установлен."
+    return 1
+}
+
 docker_menu() {
     while true; do
         # shellcheck disable=SC2034 # Массивы читаются select_menu по имени через nameref.
@@ -2385,7 +2369,7 @@ docker_menu() {
                 install_docker
                 ;;
             2)
-                if command -v docker &>/dev/null; then
+                if _require_docker; then
                     if [[ "$(prompt_yes_no "Хотите обновить Docker?" "no")" == "yes" ]]; then
                         if ${USE_SUDO:+$USE_SUDO }apt-get update && ${USE_SUDO:+$USE_SUDO }apt-get upgrade -y docker-ce docker-ce-cli containerd.io; then
                             purple "Docker успешно обновлен."
@@ -2393,12 +2377,10 @@ docker_menu() {
                             red "Ошибка при обновлении Docker."
                         fi
                     fi
-                else
-                    red "Docker не установлен."
                 fi
                 ;;
             3)
-                if command -v docker &>/dev/null; then
+                if _require_docker; then
                     if command -v docker-compose &>/dev/null || docker compose version >/dev/null 2>&1; then
                         if [[ "$(prompt_yes_no "Выполнить docker compose pull?" "no")" == "yes" ]]; then
                             if [[ -f docker-compose.yml || -f docker-compose.yaml || -f compose.yml || -f compose.yaml ]]; then
@@ -2460,7 +2442,7 @@ docker_menu() {
                 fi
                 ;;
             4)
-                if command -v docker &>/dev/null; then
+                if _require_docker; then
                     if [[ "$(prompt_yes_no "Остановить все контейнеры?" "no")" == "yes" ]]; then
                         local running_containers=()
                         mapfile -t running_containers < <(docker ps -q)
@@ -2472,12 +2454,10 @@ docker_menu() {
                             red "Не удалось остановить все контейнеры."
                         fi
                     fi
-                else
-                    red "Docker не установлен."
                 fi
                 ;;
             5)
-                if command -v docker &>/dev/null; then
+                if _require_docker; then
                     if [[ "$(prompt_yes_no "Запустить все контейнеры?" "no")" == "yes" ]]; then
                         local all_containers=()
                         mapfile -t all_containers < <(docker ps -aq)
@@ -2489,12 +2469,10 @@ docker_menu() {
                             red "Не удалось запустить все контейнеры."
                         fi
                     fi
-                else
-                    red "Docker не установлен."
                 fi
                 ;;
             6)
-                if command -v docker &>/dev/null; then
+                if _require_docker; then
                     if [[ "$(prompt_yes_no "Перезапустить все контейнеры?" "no")" == "yes" ]]; then
                         local all_containers=()
                         mapfile -t all_containers < <(docker ps -aq)
@@ -2506,12 +2484,10 @@ docker_menu() {
                             red "Не удалось перезапустить все контейнеры."
                         fi
                     fi
-                else
-                    red "Docker не установлен."
                 fi
                 ;;
             7)
-                if command -v docker &>/dev/null; then
+                if _require_docker; then
                     local containers_list=()
                     mapfile -t containers_list < <(docker ps -a --format "{{.Names}}")
                     if [[ ${#containers_list[@]} -eq 0 ]]; then
@@ -2546,33 +2522,25 @@ docker_menu() {
                             fi
                         fi
                     fi
-                else
-                    red "Docker не установлен."
                 fi
                 ;;
             8)
-                if command -v docker &>/dev/null; then
+                if _require_docker; then
                     docker ps -a
-                else
-                    red "Docker не установлен."
                 fi
                 ;;
             9)
-                if command -v docker &>/dev/null; then
+                if _require_docker; then
                     docker ps
-                else
-                    red "Docker не установлен."
                 fi
                 ;;
             10)
-                if command -v docker &>/dev/null; then
+                if _require_docker; then
                     docker images
-                else
-                    red "Docker не установлен."
                 fi
                 ;;
             11)
-                if command -v docker &>/dev/null; then
+                if _require_docker; then
                     if [[ "$(prompt_yes_no "Удалить неиспользуемые образы/тома?" "no")" == "yes" ]]; then
                         if docker system prune -af --volumes; then
                             purple "Неиспользуемые образы и тома удалены."
@@ -2580,12 +2548,10 @@ docker_menu() {
                             red "Ошибка при очистке образов/томов."
                         fi
                     fi
-                else
-                    red "Docker не установлен."
                 fi
                 ;;
             12)
-                if command -v docker &>/dev/null; then
+                if _require_docker; then
                     if [[ "$(prompt_yes_no "Удалить остановленные контейнеры?" "no")" == "yes" ]]; then
                         if docker container prune -f; then
                             purple "Остановленные контейнеры удалены."
@@ -2593,12 +2559,10 @@ docker_menu() {
                             red "Ошибка при очистке контейнеров."
                         fi
                     fi
-                else
-                    red "Docker не установлен."
                 fi
                 ;;
             13)
-                if command -v docker &>/dev/null; then
+                if _require_docker; then
                     if [[ "$(prompt_yes_no "Удалить все контейнеры?" "no")" == "yes" ]]; then
                         local all_containers=()
                         mapfile -t all_containers < <(docker ps -aq)
@@ -2610,8 +2574,6 @@ docker_menu() {
                             red "Не удалось удалить все контейнеры."
                         fi
                     fi
-                else
-                    red "Docker не установлен."
                 fi
                 ;;
             14)
@@ -2645,13 +2607,6 @@ docker_menu() {
 # ============================================================
 # DOCKER
 # ============================================================
-
-# Проверка наличия пользователей в группе docker
-check_docker_users() {
-    local raw
-    raw=$(getent group docker 2>/dev/null | cut -d: -f4)
-    [[ -n "$raw" ]]
-}
 
 # Добавление пользователя в группу docker
 add_user_to_docker() {
@@ -2693,10 +2648,7 @@ install_docker() {
         green "Docker уже установлен."
         
         # Проверяем наличие пользователей в группе docker
-        if ! check_docker_users; then
-            yellow "Внимание: нет пользователей в группе docker."
-            
-            if [[ "$(prompt_yes_no "Добавить существующего пользователя в группу docker?" "no")" == "yes" ]]; then
+        if ! [[ -n "$(getent group docker 2>/dev/null | cut -d: -f4)" ]]; then
                 select_non_system_user "" create && [[ -n "$SELECTED_USER" ]] && add_user_to_docker "$SELECTED_USER"
             elif [[ "$(prompt_yes_no "Создать нового пользователя и добавить в группы sudo и docker?" "no")" == "yes" ]]; then
                 new_user docker
@@ -2729,52 +2681,46 @@ install_docker() {
             ${USE_SUDO:+$USE_SUDO }apt-get update
             ${USE_SUDO:+$USE_SUDO }apt-get install -y wget
         fi
-        if command -v wget &>/dev/null; then
-            green "curl недоступен, используем wget для установки Docker..."
-            yellow "ВНИМАНИЕ: Следующая команда скачает и запустит скрипт с get.docker.com."
-            yellow "Убедитесь, что вы доверяете источнику, перед продолжением."
-            if [[ "$(prompt_yes_no "Загрузить и выполнить установщик Docker от get.docker.com?" "no")" == "no" ]]; then
-                return
-            fi
-            if ! installer_file=$(mktemp); then
-                red "Не удалось создать временный файл для установщика Docker."
-                return 1
-            fi
-            if ! wget -q -O "$installer_file" https://get.docker.com || [[ ! -s "$installer_file" ]]; then
-                rm -f -- "$installer_file"
-                red "Не удалось загрузить установщик Docker."
-                return 1
-            fi
-            if ! sh "$installer_file"; then
-                rm -f -- "$installer_file"
-                red "Ошибка при установке Docker через wget."
-                return 1
-            fi
-            rm -f -- "$installer_file"
-            return
-        fi
     fi
 
-    
-    green "Устанавливаем Docker..."
+    local dl_cmd=""
+    if command -v curl &>/dev/null; then
+        dl_cmd="curl"
+    elif command -v wget &>/dev/null; then
+        dl_cmd="wget"
+    else
+        red "Не удалось найти curl или wget для загрузки установщика Docker."
+        return 1
+    fi
+
+    if [[ "$dl_cmd" == "wget" ]]; then
+        green "curl недоступен, используем wget для установки Docker..."
+    else
+        green "Устанавливаем Docker..."
+        ${USE_SUDO:+$USE_SUDO }apt-get update
+    fi
     yellow "ВНИМАНИЕ: Следующая команда скачает и запустит скрипт с get.docker.com."
     yellow "Убедитесь, что вы доверяете источнику, перед продолжением."
     if [[ "$(prompt_yes_no "Загрузить и выполнить установщик Docker от get.docker.com?" "no")" == "no" ]]; then
         return
     fi
-    ${USE_SUDO:+$USE_SUDO }apt-get update
     if ! installer_file=$(mktemp); then
         red "Не удалось создать временный файл для установщика Docker."
         return 1
     fi
-    if ! curl -fsSL -o "$installer_file" https://get.docker.com || [[ ! -s "$installer_file" ]]; then
+    if [[ "$dl_cmd" == "curl" ]]; then
+        curl -fsSL -o "$installer_file" https://get.docker.com
+    else
+        wget -q -O "$installer_file" https://get.docker.com
+    fi
+    if [[ ! -s "$installer_file" ]]; then
         rm -f -- "$installer_file"
         red "Не удалось загрузить установщик Docker."
         return 1
     fi
     if ! sh "$installer_file"; then
         rm -f -- "$installer_file"
-        red "Ошибка при установке Docker через curl."
+        red "Ошибка при установке Docker через $dl_cmd."
         return 1
     fi
     rm -f -- "$installer_file"
@@ -2784,7 +2730,7 @@ install_docker() {
         purple "Docker успешно установлен. Версия: $(docker --version | awk '{print $3}' | tr -d ',')"
         
         # После установки предлагаем добавить пользователя
-        if ! check_docker_users; then
+        if ! [[ -n "$(getent group docker 2>/dev/null | cut -d: -f4)" ]]; then
             yellow "Внимание: Docker установлен, но нет пользователей в группе docker."
             if [[ "$(prompt_yes_no "Добавить существующего пользователя в группу docker?" "no")" == "yes" ]]; then
                 select_non_system_user "" create && [[ -n "$SELECTED_USER" ]] && add_user_to_docker "$SELECTED_USER"
@@ -2900,7 +2846,7 @@ new_user() {
 
 # Сохранение несекретных параметров; пароли намеренно не записываются на диск.
 out_file() {
-    local temp_file
+    local temp_file CURRENT_SSH_PORT
     if ! temp_file=$(mktemp "${INFO_FILE}.XXXXXX"); then
         red "Не удалось создать временный файл параметров $INFO_FILE."
         return 1

@@ -10,7 +10,7 @@ set -o pipefail
 # Переменные
 username=""
 USE_SUDO=""
-PROTECTION_VERSION="1.4.0"
+PROTECTION_VERSION="1.4.1"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 
 # ============================================================
@@ -2648,7 +2648,7 @@ install_docker() {
         green "Docker уже установлен."
         
         # Проверяем наличие пользователей в группе docker
-        if ! [[ -n "$(getent group docker 2>/dev/null | cut -d: -f4)" ]]; then
+        if [[ -z "$(getent group docker 2>/dev/null | cut -d: -f4)" ]]; then
             yellow "Внимание: нет пользователей в группе docker."
             if [[ "$(prompt_yes_no "Добавить существующего пользователя в группу docker?" "no")" == "yes" ]]; then
                 select_non_system_user "" create && [[ -n "$SELECTED_USER" ]] && add_user_to_docker "$SELECTED_USER"
@@ -2732,7 +2732,7 @@ install_docker() {
         purple "Docker успешно установлен. Версия: $(docker --version | awk '{print $3}' | tr -d ',')"
         
         # После установки предлагаем добавить пользователя
-        if ! [[ -n "$(getent group docker 2>/dev/null | cut -d: -f4)" ]]; then
+        if [[ -z "$(getent group docker 2>/dev/null | cut -d: -f4)" ]]; then
             yellow "Внимание: Docker установлен, но нет пользователей в группе docker."
             if [[ "$(prompt_yes_no "Добавить существующего пользователя в группу docker?" "no")" == "yes" ]]; then
                 select_non_system_user "" create && [[ -n "$SELECTED_USER" ]] && add_user_to_docker "$SELECTED_USER"

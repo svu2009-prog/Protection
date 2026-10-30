@@ -10,7 +10,7 @@ set -o pipefail
 # Переменные
 username=""
 USE_SUDO=""
-PROTECTION_VERSION="1.5.1"
+PROTECTION_VERSION="1.5.2"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 
 # ============================================================
@@ -1255,6 +1255,20 @@ validate_and_restart_sshd() {
     return 1
 }
 
+# Убедиться, что /etc/ssh/sshd_config содержит Include для sshd_config.d/*.conf
+_ensure_sshd_include() {
+    local sshd_config="/etc/ssh/sshd_config"
+    local include_line="Include /etc/ssh/sshd_config.d/*.conf"
+    if ! grep -qE '^\s*Include\s+/etc/ssh/sshd_config\.d/\*\.conf' "$sshd_config" 2>/dev/null; then
+        cp "$sshd_config" "${sshd_config}.bak" || { red "Не удалось создать резервную копию $sshd_config."; return 1; }
+        printf '%s\n' "$include_line" | cat - "$sshd_config" > "${sshd_config}.tmp" && mv "${sshd_config}.tmp" "$sshd_config" || {
+            red "Не удалось добавить Include в $sshd_config."
+            return 1
+        }
+        yellow "Добавлен Include /etc/ssh/sshd_config.d/*.conf в $sshd_config"
+    fi
+}
+
 # Восстановить именно предыдущее состояние drop-in SSH, не используя старый .bak.
 restore_sshd_dropin() {
     local dropin=$1 backup=$2 existed=$3
@@ -1380,6 +1394,7 @@ toggle_pubkey_auth() {
     fi
 
     mkdir -p "$(dirname "$sshd_dropin")" || { red "Не удалось создать каталог drop-in SSH."; return 1; }
+    _ensure_sshd_include || return 1
     if [[ -f "$sshd_dropin" ]]; then
         existed="yes"
         backup=$(mktemp "$(dirname "$sshd_dropin")/.00-protection.XXXXXX") || { red "Не удалось создать резервную копию SSH drop-in."; return 1; }
@@ -1552,6 +1567,7 @@ set_permit_root_login() {
     local sshd_dropin="/etc/ssh/sshd_config.d/00-protection.conf"
     local backup="" existed="no"
     mkdir -p "$(dirname "$sshd_dropin")" || { red "Не удалось создать каталог drop-in SSH."; return 1; }
+    _ensure_sshd_include || return 1
     if [[ -f "$sshd_dropin" ]]; then
         existed="yes"
         backup=$(mktemp "$(dirname "$sshd_dropin")/.00-protection.XXXXXX") || { red "Не удалось создать резервную копию SSH drop-in."; return 1; }
@@ -1656,6 +1672,7 @@ change_port_ssh() {
             fi
             sshd_dropin="/etc/ssh/sshd_config.d/00-protection.conf"
             mkdir -p "$(dirname "$sshd_dropin")" || { red "Не удалось создать каталог drop-in SSH."; return 1; }
+            _ensure_sshd_include || return 1
             backup=""
             existed="no"
             ufw_rule_added="no"

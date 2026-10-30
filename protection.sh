@@ -10,7 +10,7 @@ set -o pipefail
 # Переменные
 username=""
 USE_SUDO=""
-PROTECTION_VERSION="1.5.0"
+PROTECTION_VERSION="1.5.1"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 
 # ============================================================
@@ -1360,21 +1360,88 @@ _add_ssh_key_flow() {
     green "Настройка SSH-ключей для пользователя $username завершена."
 }
 
+toggle_pubkey_auth() {
+    local sshd_dropin="/etc/ssh/sshd_config.d/00-protection.conf"
+    local backup="" existed="no"
+    local current_val
+    current_val=$(sshd -T 2>/dev/null | awk '/^pubkeyauthentication/ {print $2; exit}')
+    [[ -z "$current_val" ]] && current_val="yes"
+
+    if [[ "$current_val" == "yes" ]]; then
+        if [[ "$(prompt_yes_no "Аутентификация по ключу включена. Отключить?" "no")" != "yes" ]]; then
+            return
+        fi
+        local new_val="no"
+    else
+        if [[ "$(prompt_yes_no "Аутентификация по ключу отключена. Включить?" "yes")" != "yes" ]]; then
+            return
+        fi
+        local new_val="yes"
+    fi
+
+    mkdir -p "$(dirname "$sshd_dropin")" || { red "Не удалось создать каталог drop-in SSH."; return 1; }
+    if [[ -f "$sshd_dropin" ]]; then
+        existed="yes"
+        backup=$(mktemp "$(dirname "$sshd_dropin")/.00-protection.XXXXXX") || { red "Не удалось создать резервную копию SSH drop-in."; return 1; }
+        cp -p -- "$sshd_dropin" "$backup" || { rm -f -- "$backup"; red "Не удалось создать резервную копию SSH drop-in."; return 1; }
+        if ! sed -i -E "/^[[:space:]]*PubkeyAuthentication[[:space:]]/d; 1iPubkeyAuthentication $new_val" "$sshd_dropin"; then
+            restore_sshd_dropin "$sshd_dropin" "$backup" "$existed" || red "Требуется ручная проверка конфигурации SSH после неудачного отката."
+            rm -f -- "$backup"
+            red "Не удалось изменить PubkeyAuthentication."
+            return 1
+        fi
+    elif ! printf 'PubkeyAuthentication %s\n' "$new_val" > "$sshd_dropin"; then
+        rm -f -- "$sshd_dropin"
+        red "Не удалось изменить PubkeyAuthentication."
+        return 1
+    fi
+
+    if ! validate_and_restart_sshd; then
+        restore_sshd_dropin "$sshd_dropin" "$backup" "$existed" || red "Требуется ручная проверка конфигурации SSH после неудачного отката."
+        [[ -n "$backup" ]] && rm -f -- "$backup"
+        return 1
+    fi
+
+    [[ -n "$backup" ]] && rm -f -- "$backup"
+
+    if [[ "$new_val" == "yes" ]]; then
+        purple "Аутентификация по ключу включена."
+    else
+        purple "Аутентификация по ключу отключена."
+    fi
+}
+
 setup_ssh_keys() {
     local ssh_labels=() ssh_values=()
+    local pubkey_status
+    pubkey_status=$(sshd -T 2>/dev/null | awk '/^pubkeyauthentication/ {print $2; exit}')
+    [[ -z "$pubkey_status" ]] && pubkey_status="yes"
+
+    if [[ "$pubkey_status" == "yes" ]]; then
+        local pubkey_label="5. Отключить аутентификацию по ключу"
+    else
+        local pubkey_label="5. Включить аутентификацию по ключу"
+    fi
+
     ssh_labels=(
         "1. Добавить новый ключ пользователю"
         "2. Использовать существующий ключ для пользователя"
         "3. Добавить новый ключ для root"
         "4. Использовать существующий ключ для root"
+        "$pubkey_label"
         "0. Назад"
     )
-    ssh_values=(1 2 3 4 0)
+    ssh_values=(1 2 3 4 5 0)
 
     select_menu "Настройка SSH-ключей" ssh_labels ssh_values
     local choice="$MENU_CHOICE"
 
     if [[ "$choice" == "0" ]]; then
+        return
+    fi
+
+    if [[ "$choice" == "5" ]]; then
+        toggle_pubkey_auth
         return
     fi
 
@@ -2931,7 +2998,7 @@ show_help() {
     echo "4. Пользователи — управление пользователями и группами. Возможные проблемы: удаление пользователя с home удалит данные."
     echo "5. Отключить/включить PING — меняет sysctl. Возможные проблемы: диагностика сети затруднится."
     echo "6. Отключить/включить IPv6 — меняет sysctl, автоматически проверяет и при необходимости устанавливает/загружает модуль ядра ipv6. Возможные проблемы: сервисы/туннели могут перестать работать."
-    echo "7. Настроить SSH ключи — добавляет ключ в authorized_keys пользователя. Возможные проблемы: ошибка доступа при неверных правах."
+    echo "7. Настроить SSH ключи — добавляет ключ в authorized_keys пользователя, включает/отключает аутентификацию по ключу (PubkeyAuthentication). Возможные проблемы: отключение ключей без активного пароля оставит сервер без SSH-доступа."
     echo "8. Fail2ban — защита от брутфорса, управление jail. Возможные проблемы: можно заблокировать себя при ошибках."
     yellow "Рекомендуется: добавить свой IP в ignoreip."
     echo "9. UFW — настройка firewall и управление правилами. Возможные проблемы: блокировка SSH при неверных правилах."

@@ -10,7 +10,7 @@ set -o pipefail
 # Переменные
 username=""
 USE_SUDO=""
-PROTECTION_VERSION="1.5.2"
+PROTECTION_VERSION="1.5.3"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 
 # ============================================================
@@ -1382,6 +1382,9 @@ toggle_pubkey_auth() {
     [[ -z "$current_val" ]] && current_val="yes"
 
     if [[ "$current_val" == "yes" ]]; then
+        yellow "ВНИМАНИЕ: После отключения аутентификации по ключу вход будет возможен только по паролю."
+        yellow "Убедитесь, что вход по паролю разрешён и пароль задан, ПРЕЖДЕ чем отключать ключи."
+        yellow "Проверьте вход по паролю в отдельном терминале, не закрывая этот сеанс."
         if [[ "$(prompt_yes_no "Аутентификация по ключу включена. Отключить?" "no")" != "yes" ]]; then
             return
         fi

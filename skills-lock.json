@@ -5,19 +5,19 @@
       "source": "jamie-bitflight/claude_skills",
       "sourceType": "github",
       "skillPath": "plugins/bash-development/skills/bash-53-features/SKILL.md",
-      "computedHash": "22bac771aaa8b2e6e7bb5c146d255439bc5c7f96012ab023e09f270c35a8e4bb"
+      "computedHash": "50c315ffffafd42ba6a1b2a96b8bf2b782548d6d32f7caca8080071c64e2ee59"
     },
     "bash-defensive-patterns": {
       "source": "wshobson/agents",
       "sourceType": "github",
       "skillPath": "plugins/shell-scripting/skills/bash-defensive-patterns/SKILL.md",
-      "computedHash": "01ca58e501ed4c63de80cf9e33bb75ea00a0a8f903614bf8c9ae26c2f52d3914"
+      "computedHash": "2443ceea5a3d83a805c5ac1686df924d778809ac752175f4d5179cae2f3a34d2"
     },
     "bash-linux": {
       "source": "sickn33/antigravity-awesome-skills",
       "sourceType": "github",
       "skillPath": "skills/bash-linux/SKILL.md",
-      "computedHash": "05cc25cfbdaf3436a7eec4730d28cff6da3c34434f089cf0cac56b22a47a8c3d"
+      "computedHash": "e18a0aff172b4a8189b2d105021a63beff64678c7241944312cff3b1ca867c2d"
     },
     "find-skills": {
       "source": "vercel-labs/skills",

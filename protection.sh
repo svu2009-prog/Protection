@@ -5,17 +5,12 @@ set -o pipefail
 # ============================================================
 # СКРИПТ АВТОМАТИЗАЦИИ НАСТРОЙКИ СЕРВЕРА
 # Совместимость: Ubuntu, Debian (с sudo и без sudo)
-#
-# СГЕНЕРИРОВАНО ИЗ src/ через build.sh — НЕ РЕДАКТИРОВАТЬ НАПРЯМУЮ.
-# Редактируйте модули в src/, затем запускайте: ./build.sh
-# Порядок модулей: 00-header, 10-core, 20-network, 30-users, 40-ssh,
-#                  50-ufw, 60-fail2ban, 70-docker, 90-main
 # ============================================================
 
 # Переменные
 username=""
 USE_SUDO=""
-PROTECTION_VERSION="2.0.0"
+PROTECTION_VERSION="1.5.3"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 
 # ============================================================
@@ -35,6 +30,9 @@ F2B_RECIDIVE_MAXRETRY=2
 # Зарезервированные имена пользователей (системные)
 RESERVED_USERNAMES=(root bin daemon adm lp sync shutdown halt mail news uucp operator games ftp nobody systemd-timesync systemd-network systemd-resolve systemd-bus-proxy sys log uuidd admin)
 
+# ============================================================
+# ОПРЕДЕЛЕНИЕ НАЛИЧИЯ SUDO
+# ============================================================
 
 # Проверка наличия sudo и определение префикса команд
 check_sudo() {
@@ -467,6 +465,38 @@ validate_port() {
     local max=${3:-65535}
     [[ "$port" =~ ^[0-9]+$ && "$port" -ge "$min" && "$port" -le "$max" ]]
 }
+
+# Проверка порта SSH (диапазон 1024-65535)
+# Получение текущего порта SSH из конфигурации
+get_ssh_port() {
+    local port
+    # Фактическое значение (учитывает Include sshd_config.d), fallback на основной конфиг
+    port=$(sshd -T 2>/dev/null | awk '/^port[[:space:]]/ {print $2; exit}')
+    [[ -z "$port" ]] && port=$(grep -i '^Port' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | xargs)
+    [[ -z "$port" ]] && port=22
+    echo "$port"
+}
+
+ufw_allow_port() {
+    local port=$1
+    local proto=$2
+
+    if ! validate_port "$port" 1 65535; then
+        red "Некорректный порт для UFW: $port"
+        return 1
+    fi
+
+    case "$proto" in
+        tcp|udp) ;;
+        *)
+            red "Некорректный протокол для UFW: $proto"
+            return 1
+            ;;
+    esac
+
+    echo "y" | ${USE_SUDO:+$USE_SUDO }ufw allow "$port/$proto" >/dev/null 2>&1
+}
+
 # Проверка имени пользователя
 validate_username() {
     local username=$1
@@ -525,6 +555,120 @@ validate_password() {
     return 0
 }
 
+# ============================================================
+# ФУНКЦИИ РАБОТЫ С UFW
+# ============================================================
+
+# ============================================================
+# ФУНКЦИИ УПРАВЛЕНИЯ ПОЛЬЗОВАТЕЛЯМИ
+# ============================================================
+
+# Добавление пользователя в sudoers для выполнения команд без пароля
+add_user_nopasswd() {
+    local username=$1 sudoers_file temp_file
+    
+    if [[ -z "$USE_SUDO" ]]; then
+        yellow "sudo не установлен, пропускаем настройку NOPASSWD"
+        return
+    fi
+    
+    if ! command -v visudo &>/dev/null; then
+        red "Команда visudo не найдена; настройка sudoers отменена."
+        return 1
+    fi
+
+    sudoers_file="/etc/sudoers.d/$username"
+    if ! temp_file=$(mktemp "/etc/sudoers.d/.${username}.XXXXXX"); then
+        red "Не удалось создать временный sudoers-файл."
+        return 1
+    fi
+    if ! printf '%s ALL=(ALL) NOPASSWD:ALL\n' "$username" > "$temp_file" ||
+        ! chmod 0440 "$temp_file" ||
+        ! visudo -cf "$temp_file" >/dev/null ||
+        ! mv -f -- "$temp_file" "$sudoers_file"; then
+        rm -f -- "$temp_file"
+        red "Не удалось проверить и атомарно установить /etc/sudoers.d/$username."
+        return 1
+    fi
+    purple "Пользователь $username добавлен в группу для выполнения команд без пароля."
+}
+
+# Удаление пользователя из sudoers (возврат требования пароля)
+remove_user_nopasswd() {
+    local username=$1
+    if rm -f "/etc/sudoers.d/$username"; then
+        purple "Пользователь $username исключен из группы для выполнения команд без пароля."
+    else
+        red "Не удалось удалить настройку NOPASSWD для пользователя $username."
+        return 1
+    fi
+}
+
+# Изменение пароля существующего пользователя
+change_user_password() {
+    local username=$1
+    local password password_confirm
+
+    while true; do
+        read -rs -p "Введите новый пароль для пользователя $username: " password
+        echo
+
+        if validate_password "$password"; then
+            read -rs -p "Повторите новый пароль для пользователя $username: " password_confirm
+            echo
+            
+            if [[ "$password" == "$password_confirm" ]]; then
+                if printf '%s\n' "$username:$password" | chpasswd; then
+                    green "Пароль для пользователя $username успешно изменен."
+                    break
+                else
+                    red "Не удалось изменить пароль для пользователя $username."
+                    break
+                fi
+            else
+                red "Пароли не совпадают. Попробуйте снова."
+            fi
+        fi
+    done
+}
+
+# Изменение пароля root
+change_root_pass() {
+    local ROOT_PASSWORD_CONFIRM=""
+    if [[ "$(prompt_yes_no "Хотите изменить пароль root?" "no")" == "no" ]]; then
+        return
+    fi
+    
+    while true; do
+        local root_password
+        read -rs -p "Введите новый пароль для root: " root_password
+        echo
+        
+        if validate_password "$root_password"; then
+            read -rs -p "Повторите новый пароль для root: " ROOT_PASSWORD_CONFIRM
+            echo
+            
+            if [[ "$root_password" == "$ROOT_PASSWORD_CONFIRM" ]]; then
+                if printf '%s\n' "root:$root_password" | chpasswd; then
+                    green "Пароль root успешно изменен."
+                    unset root_password ROOT_PASSWORD_CONFIRM
+                    break
+                else
+                    red "Не удалось изменить пароль root."
+                    unset root_password ROOT_PASSWORD_CONFIRM
+                    break
+                fi
+            else
+                red "Пароли не совпадают. Попробуйте снова."
+                unset root_password ROOT_PASSWORD_CONFIRM
+            fi
+        else
+            unset root_password
+        fi
+    done
+}
+
+# ============================================================
 # ФУНКЦИЯ ИНТЕРАКТИВНЫХ ЗАПРОСОВ
 # ============================================================
 
@@ -559,7 +703,6 @@ prompt_yes_no() {
         esac
     done
 }
-
 
 # ============================================================
 # SYSCTL ДРОП-ИН
@@ -900,150 +1043,6 @@ disable_ipv6() {
 
 
 # ============================================================
-# ============================================================
-# БЛОКИРОВКА PING
-# ============================================================
-
-# Функция для отключения/включения ICMP ping
-disable_ping() {
-    local PING_STATUS
-    # Фактическое значение ядра (учитывает и sysctl.conf, и дроп-ины)
-    PING_STATUS=$(sysctl -n net.ipv4.icmp_echo_ignore_all 2>/dev/null)
-
-    if [[ "$PING_STATUS" == "1" ]]; then
-        if [[ "$(prompt_yes_no "Доступ к команде ping отключен. Хотите включить?" "no")" == "yes" ]]; then
-            if apply_sysctl_keys "net.ipv4.icmp_echo_ignore_all=0"; then
-                purple "Доступ к команде ping включен."
-            else
-                red "Ошибка применения sysctl. Проверьте /etc/sysctl.d/99-protection.conf."
-            fi
-        fi
-    else
-        if [[ "$(prompt_yes_no "Хотите отключить доступ к команде ping?" "no")" == "yes" ]]; then
-            if apply_sysctl_keys "net.ipv4.icmp_echo_ignore_all=1"; then
-                purple "Доступ к команде ping отключен."
-            else
-                red "Ошибка применения sysctl. Проверьте /etc/sysctl.d/99-protection.conf."
-            fi
-        fi
-    fi
-}
-
-
-# ============================================================
-# ФУНКЦИИ РАБОТЫ С UFW
-# ============================================================
-
-# ============================================================
-# ФУНКЦИИ УПРАВЛЕНИЯ ПОЛЬЗОВАТЕЛЯМИ
-# ============================================================
-
-# Добавление пользователя в sudoers для выполнения команд без пароля
-add_user_nopasswd() {
-    local username=$1 sudoers_file temp_file
-    
-    if [[ -z "$USE_SUDO" ]]; then
-        yellow "sudo не установлен, пропускаем настройку NOPASSWD"
-        return
-    fi
-    
-    if ! command -v visudo &>/dev/null; then
-        red "Команда visudo не найдена; настройка sudoers отменена."
-        return 1
-    fi
-
-    sudoers_file="/etc/sudoers.d/$username"
-    if ! temp_file=$(mktemp "/etc/sudoers.d/.${username}.XXXXXX"); then
-        red "Не удалось создать временный sudoers-файл."
-        return 1
-    fi
-    if ! printf '%s ALL=(ALL) NOPASSWD:ALL\n' "$username" > "$temp_file" ||
-        ! chmod 0440 "$temp_file" ||
-        ! visudo -cf "$temp_file" >/dev/null ||
-        ! mv -f -- "$temp_file" "$sudoers_file"; then
-        rm -f -- "$temp_file"
-        red "Не удалось проверить и атомарно установить /etc/sudoers.d/$username."
-        return 1
-    fi
-    purple "Пользователь $username добавлен в группу для выполнения команд без пароля."
-}
-
-# Удаление пользователя из sudoers (возврат требования пароля)
-remove_user_nopasswd() {
-    local username=$1
-    if rm -f "/etc/sudoers.d/$username"; then
-        purple "Пользователь $username исключен из группы для выполнения команд без пароля."
-    else
-        red "Не удалось удалить настройку NOPASSWD для пользователя $username."
-        return 1
-    fi
-}
-
-# Изменение пароля существующего пользователя
-change_user_password() {
-    local username=$1
-    local password password_confirm
-
-    while true; do
-        read -rs -p "Введите новый пароль для пользователя $username: " password
-        echo
-
-        if validate_password "$password"; then
-            read -rs -p "Повторите новый пароль для пользователя $username: " password_confirm
-            echo
-            
-            if [[ "$password" == "$password_confirm" ]]; then
-                if printf '%s\n' "$username:$password" | chpasswd; then
-                    green "Пароль для пользователя $username успешно изменен."
-                    break
-                else
-                    red "Не удалось изменить пароль для пользователя $username."
-                    break
-                fi
-            else
-                red "Пароли не совпадают. Попробуйте снова."
-            fi
-        fi
-    done
-}
-
-# Изменение пароля root
-change_root_pass() {
-    local ROOT_PASSWORD_CONFIRM=""
-    if [[ "$(prompt_yes_no "Хотите изменить пароль root?" "no")" == "no" ]]; then
-        return
-    fi
-    
-    while true; do
-        local root_password
-        read -rs -p "Введите новый пароль для root: " root_password
-        echo
-        
-        if validate_password "$root_password"; then
-            read -rs -p "Повторите новый пароль для root: " ROOT_PASSWORD_CONFIRM
-            echo
-            
-            if [[ "$root_password" == "$ROOT_PASSWORD_CONFIRM" ]]; then
-                if printf '%s\n' "root:$root_password" | chpasswd; then
-                    green "Пароль root успешно изменен."
-                    unset root_password ROOT_PASSWORD_CONFIRM
-                    break
-                else
-                    red "Не удалось изменить пароль root."
-                    unset root_password ROOT_PASSWORD_CONFIRM
-                    break
-                fi
-            else
-                red "Пароли не совпадают. Попробуйте снова."
-                unset root_password ROOT_PASSWORD_CONFIRM
-            fi
-        else
-            unset root_password
-        fi
-    done
-}
-
-# ============================================================
 # ДОПОЛНИТЕЛЬНОЕ МЕНЮ ПОЛЬЗОВАТЕЛЕЙ
 # ============================================================
 
@@ -1232,158 +1231,6 @@ users_menu() {
 
 
 # ============================================================
-# ============================================================
-# СОЗДАНИЕ ПОЛЬЗОВАТЕЛЯ
-# ============================================================
-
-# Функция для создания нового пользователя
-create_user() {
-    local username=$1
-    local password=$2
-    local nopass=$3
-    local groups=$4
-    
-    green "Пользователь: $username"
-    
-    # Создаем пользователя с указанными группами
-    if ! useradd -m "$username" ${groups:+-G "$groups"} -s /bin/bash; then
-        red "Ошибка при создании пользователя $username."
-        return 1
-    fi
-    
-    # Устанавливаем пароль
-    if ! printf '%s\n' "$username:$password" | chpasswd; then
-        red "Ошибка при установке пароля для пользователя $username."
-        userdel -r "$username"
-        return 1
-    fi
-    
-    # Добавляем в sudoers без пароля, если требуется и sudo установлен
-    if [[ "$nopass" == "yes" && -n "$USE_SUDO" ]]; then
-        if ! add_user_nopasswd "$username"; then
-            yellow "Пользователь создан, но настройку NOPASSWD не удалось применить."
-        fi
-    fi
-    
-    yellow "Проверяем какие права имеет пользователь $username"
-    if [[ -n "$USE_SUDO" ]]; then
-        sudo -l -U "$username" 2>/dev/null
-        green "Если вы видите такую надпись (ALL : ALL) ALL то все нормально"
-    fi
-    
-    purple "Пользователь $username создан."
-}
-
-# ============================================================
-# СОЗДАНИЕ НОВОГО ПОЛЬЗОВАТЕЛЯ
-# ============================================================
-
-# Функция создания нового пользователя с интерактивным выбором параметров
-new_user() {
-    local target_groups=""
-    local password password_confirm
-    
-    # Определяем группы в зависимости от наличия sudo
-    if [[ -n "$USE_SUDO" ]]; then
-        target_groups="sudo"
-        [[ "$1" == "docker" ]] && target_groups="sudo,docker"
-    else
-        target_groups=""
-        [[ "$1" == "docker" ]] && target_groups="docker"
-    fi
-    
-    while true; do
-        if [[ "$(prompt_yes_no "Хотите создать нового пользователя?" "no")" == "no" ]]; then
-            break
-        fi
-        
-        # Выбор имени пользователя
-        while true; do
-            local recommended_username
-            recommended_username=$(head -c 64 /dev/urandom | tr -dc '[:lower:]' | head -c 1; head -c 64 /dev/urandom | tr -dc '[:lower:][:digit:]' | head -c 7)
-            
-            if [[ "$(prompt_yes_no "Рекомендуемое имя пользователя $recommended_username, оставить?" "yes")" == "yes" ]]; then
-                username=$recommended_username
-            else
-                read -r -p "Введите имя пользователя: " username
-            fi
-            
-            validate_username "$username" && break
-        done
-        
-        # Проверка существования пользователя
-        if id "$username" &>/dev/null; then
-            echo "Пользователь $username уже существует."
-            
-            if [[ "$(prompt_yes_no "Хотите изменить пароль для пользователя $username?" "no")" == "yes" ]]; then
-                change_user_password "$username"
-            fi
-            
-            if [[ -n "$USE_SUDO" ]]; then
-                local sudoers_found="no"
-                if [[ -d /etc/sudoers.d ]] && grep -rqF "$username ALL=(ALL) NOPASSWD:ALL" /etc/sudoers.d 2>/dev/null; then
-                    sudoers_found="yes"
-                fi
-                if [[ "$sudoers_found" == "yes" ]]; then
-                    if [[ "$(prompt_yes_no "Хотите исключить пользователя $username из группы для выполнения команд без пароля?" "no")" == "yes" ]]; then
-                        remove_user_nopasswd "$username"
-                    fi
-                else
-                    if [[ "$(prompt_yes_no "Хотите добавить пользователя $username в группу для выполнения команд без пароля?" "no")" == "yes" ]]; then
-                        add_user_nopasswd "$username"
-                    fi
-                fi
-            fi
-            
-            # Добавляем в группу docker, если требуется
-            [[ "$1" == "docker" ]] && add_user_to_docker "$username"
-        else
-            # Создание нового пользователя
-            while true; do
-                read -rs -p "Введите пароль для пользователя $username: " password
-                echo
-
-                if ! validate_password "$password"; then
-                    unset password
-                    continue
-                fi
-
-                read -rs -p "Повторите пароль для пользователя $username: " password_confirm
-                echo
-
-                if [[ "$password" != "$password_confirm" ]]; then
-                    red "Пароли не совпадают. Попробуйте снова."
-                    unset password password_confirm
-                    continue
-                fi
-                unset password_confirm
-                break
-            done
-            
-            local nopass="no"
-            if [[ -n "$USE_SUDO" ]]; then
-                nopass=$(prompt_yes_no "Разрешить выполнение команд без пароля для $username?" "no")
-            fi
-            
-            create_user "$username" "$password" "$nopass" "$target_groups"
-            unset password
-        fi
-    done
-}
-
-
-
-# Проверка порта SSH (диапазон 1024-65535)
-# Получение текущего порта SSH из конфигурации
-get_ssh_port() {
-    local port
-    # Фактическое значение (учитывает Include sshd_config.d), fallback на основной конфиг
-    port=$(sshd -T 2>/dev/null | awk '/^port[[:space:]]/ {print $2; exit}')
-    [[ -z "$port" ]] && port=$(grep -i '^Port' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | xargs)
-    [[ -z "$port" ]] && port=22
-    echo "$port"
-}
-
 # НАСТРОЙКА SSH-КЛЮЧЕЙ
 # ============================================================
 
@@ -1643,6 +1490,77 @@ setup_ssh_keys() {
 }
 
 # ============================================================
+# СОЗДАНИЕ ПОЛЬЗОВАТЕЛЯ
+# ============================================================
+
+# Функция для создания нового пользователя
+create_user() {
+    local username=$1
+    local password=$2
+    local nopass=$3
+    local groups=$4
+    
+    green "Пользователь: $username"
+    
+    # Создаем пользователя с указанными группами
+    if ! useradd -m "$username" ${groups:+-G "$groups"} -s /bin/bash; then
+        red "Ошибка при создании пользователя $username."
+        return 1
+    fi
+    
+    # Устанавливаем пароль
+    if ! printf '%s\n' "$username:$password" | chpasswd; then
+        red "Ошибка при установке пароля для пользователя $username."
+        userdel -r "$username"
+        return 1
+    fi
+    
+    # Добавляем в sudoers без пароля, если требуется и sudo установлен
+    if [[ "$nopass" == "yes" && -n "$USE_SUDO" ]]; then
+        if ! add_user_nopasswd "$username"; then
+            yellow "Пользователь создан, но настройку NOPASSWD не удалось применить."
+        fi
+    fi
+    
+    yellow "Проверяем какие права имеет пользователь $username"
+    if [[ -n "$USE_SUDO" ]]; then
+        sudo -l -U "$username" 2>/dev/null
+        green "Если вы видите такую надпись (ALL : ALL) ALL то все нормально"
+    fi
+    
+    purple "Пользователь $username создан."
+}
+
+# ============================================================
+# БЛОКИРОВКА PING
+# ============================================================
+
+# Функция для отключения/включения ICMP ping
+disable_ping() {
+    local PING_STATUS
+    # Фактическое значение ядра (учитывает и sysctl.conf, и дроп-ины)
+    PING_STATUS=$(sysctl -n net.ipv4.icmp_echo_ignore_all 2>/dev/null)
+
+    if [[ "$PING_STATUS" == "1" ]]; then
+        if [[ "$(prompt_yes_no "Доступ к команде ping отключен. Хотите включить?" "no")" == "yes" ]]; then
+            if apply_sysctl_keys "net.ipv4.icmp_echo_ignore_all=0"; then
+                purple "Доступ к команде ping включен."
+            else
+                red "Ошибка применения sysctl. Проверьте /etc/sysctl.d/99-protection.conf."
+            fi
+        fi
+    else
+        if [[ "$(prompt_yes_no "Хотите отключить доступ к команде ping?" "no")" == "yes" ]]; then
+            if apply_sysctl_keys "net.ipv4.icmp_echo_ignore_all=1"; then
+                purple "Доступ к команде ping отключен."
+            else
+                red "Ошибка применения sysctl. Проверьте /etc/sysctl.d/99-protection.conf."
+            fi
+        fi
+    fi
+}
+
+# ============================================================
 # НАСТРОЙКА SSH
 # ============================================================
 
@@ -1824,28 +1742,6 @@ change_port_ssh() {
             red "Недопустимый порт. Порт должен быть в диапазоне от 1024 до 65535."
         fi
     done
-}
-
-
-
-ufw_allow_port() {
-    local port=$1
-    local proto=$2
-
-    if ! validate_port "$port" 1 65535; then
-        red "Некорректный порт для UFW: $port"
-        return 1
-    fi
-
-    case "$proto" in
-        tcp|udp) ;;
-        *)
-            red "Некорректный протокол для UFW: $proto"
-            return 1
-            ;;
-    esac
-
-    echo "y" | ${USE_SUDO:+$USE_SUDO }ufw allow "$port/$proto" >/dev/null 2>&1
 }
 
 # ============================================================
@@ -2138,7 +2034,6 @@ ufw_menu() {
         esac
     done
 }
-
 
 # ============================================================
 # FAIL2BAN
@@ -2553,7 +2448,6 @@ fail2ban_menu() {
 
 
 # ============================================================
-
 # ДОПОЛНИТЕЛЬНОЕ МЕНЮ DOCKER
 # ============================================================
 
@@ -2986,6 +2880,102 @@ install_docker() {
     fi
 }
 
+# ============================================================
+# СОЗДАНИЕ НОВОГО ПОЛЬЗОВАТЕЛЯ
+# ============================================================
+
+# Функция создания нового пользователя с интерактивным выбором параметров
+new_user() {
+    local target_groups=""
+    local password password_confirm
+    
+    # Определяем группы в зависимости от наличия sudo
+    if [[ -n "$USE_SUDO" ]]; then
+        target_groups="sudo"
+        [[ "$1" == "docker" ]] && target_groups="sudo,docker"
+    else
+        target_groups=""
+        [[ "$1" == "docker" ]] && target_groups="docker"
+    fi
+    
+    while true; do
+        if [[ "$(prompt_yes_no "Хотите создать нового пользователя?" "no")" == "no" ]]; then
+            break
+        fi
+        
+        # Выбор имени пользователя
+        while true; do
+            local recommended_username
+            recommended_username=$(head -c 64 /dev/urandom | tr -dc '[:lower:]' | head -c 1; head -c 64 /dev/urandom | tr -dc '[:lower:][:digit:]' | head -c 7)
+            
+            if [[ "$(prompt_yes_no "Рекомендуемое имя пользователя $recommended_username, оставить?" "yes")" == "yes" ]]; then
+                username=$recommended_username
+            else
+                read -r -p "Введите имя пользователя: " username
+            fi
+            
+            validate_username "$username" && break
+        done
+        
+        # Проверка существования пользователя
+        if id "$username" &>/dev/null; then
+            echo "Пользователь $username уже существует."
+            
+            if [[ "$(prompt_yes_no "Хотите изменить пароль для пользователя $username?" "no")" == "yes" ]]; then
+                change_user_password "$username"
+            fi
+            
+            if [[ -n "$USE_SUDO" ]]; then
+                local sudoers_found="no"
+                if [[ -d /etc/sudoers.d ]] && grep -rqF "$username ALL=(ALL) NOPASSWD:ALL" /etc/sudoers.d 2>/dev/null; then
+                    sudoers_found="yes"
+                fi
+                if [[ "$sudoers_found" == "yes" ]]; then
+                    if [[ "$(prompt_yes_no "Хотите исключить пользователя $username из группы для выполнения команд без пароля?" "no")" == "yes" ]]; then
+                        remove_user_nopasswd "$username"
+                    fi
+                else
+                    if [[ "$(prompt_yes_no "Хотите добавить пользователя $username в группу для выполнения команд без пароля?" "no")" == "yes" ]]; then
+                        add_user_nopasswd "$username"
+                    fi
+                fi
+            fi
+            
+            # Добавляем в группу docker, если требуется
+            [[ "$1" == "docker" ]] && add_user_to_docker "$username"
+        else
+            # Создание нового пользователя
+            while true; do
+                read -rs -p "Введите пароль для пользователя $username: " password
+                echo
+
+                if ! validate_password "$password"; then
+                    unset password
+                    continue
+                fi
+
+                read -rs -p "Повторите пароль для пользователя $username: " password_confirm
+                echo
+
+                if [[ "$password" != "$password_confirm" ]]; then
+                    red "Пароли не совпадают. Попробуйте снова."
+                    unset password password_confirm
+                    continue
+                fi
+                unset password_confirm
+                break
+            done
+            
+            local nopass="no"
+            if [[ -n "$USE_SUDO" ]]; then
+                nopass=$(prompt_yes_no "Разрешить выполнение команд без пароля для $username?" "no")
+            fi
+            
+            create_user "$username" "$password" "$nopass" "$target_groups"
+            unset password
+        fi
+    done
+}
 
 # ============================================================
 # ВЫВОД ИНФОРМАЦИИ В ФАЙЛ

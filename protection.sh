@@ -10,7 +10,7 @@ set -o pipefail
 # Переменные
 username=""
 USE_SUDO=""
-PROTECTION_VERSION="1.5.3"
+PROTECTION_VERSION="1.6.0"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 
 # ============================================================
@@ -954,6 +954,48 @@ ipv6_diagnostics() {
     fi
 }
 
+show_server_ip() {
+    green "IP-адреса сервера:"
+    echo " "
+    
+    if command -v ip &>/dev/null; then
+        yellow "IPv4:"
+        ip -4 addr show 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | while read -r ip; do
+            echo "  $ip"
+        done
+        
+        echo " "
+        yellow "IPv6:"
+        if ipv6_stack_available && ! ipv6_interfaces_have_value 1; then
+            ip -6 addr show 2>/dev/null | grep -oP '(?<=inet6\s)[0-9a-f:]+' | while read -r ip; do
+                echo "  $ip"
+            done
+        else
+            echo "  IPv6 отключен или недоступен"
+        fi
+    elif command -v ifconfig &>/dev/null; then
+        yellow "IPv4:"
+        ifconfig 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '127.0.0.1' | while read -r ip; do
+            echo "  $ip"
+        done
+        
+        echo " "
+        yellow "IPv6:"
+        if ipv6_stack_available && ! ipv6_interfaces_have_value 1; then
+            ifconfig 2>/dev/null | grep -oP '(?<=inet6\s)[0-9a-f:]+' | while read -r ip; do
+                echo "  $ip"
+            done
+        else
+            echo "  IPv6 отключен или недоступен"
+        fi
+    else
+        red "Команды ip и ifconfig недоступны."
+        return 1
+    fi
+    
+    echo " "
+}
+
 # Функция для отключения/включения IPv6
 disable_ipv6() {
     # Без модуля ipv6 sysctl-ключи недоступны — включение/отключение IPv6 не работает
@@ -962,8 +1004,11 @@ disable_ipv6() {
         return 1
     fi
 
+    # Показываем IP сервера
+    show_server_ip
+    
     # Проверяем текущий статус IPv6
-
+    
 
     # Если IPv6 уже отключен
     if ipv6_interfaces_have_value 1; then

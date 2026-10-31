@@ -10,7 +10,7 @@ set -o pipefail
 # Переменные
 username=""
 USE_SUDO=""
-PROTECTION_VERSION="1.6.3"
+PROTECTION_VERSION="1.6.4"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 
 # ============================================================
@@ -970,8 +970,9 @@ show_server_ip() {
         echo " "
         yellow "IPv6:"
         if ipv6_stack_available && ! ipv6_interfaces_have_value 1; then
-            # Показываем только IPv6 физических сетевых интерфейсов, исключаем link-local
-            ip -6 addr show 2>/dev/null | awk '/^[0-9]+: (eth|ens|enp|eno)/ {iface=1} /^[0-9]+: / && !/^[0-9]+: (eth|ens|enp|eno)/ {iface=0} iface && /inet6/ && !/scope link/ {print $2}' | cut -d'/' -f1 | while read -r ip; do
+            # Показываем только IPv6 физических сетевых интерфейсов
+            # Исключаем link-local (fe80::), ULA (fc00::, fd00::), multicast (ff00::) - все адреса начинающиеся на f
+            ip -6 addr show 2>/dev/null | awk '/^[0-9]+: (eth|ens|enp|eno)/ {iface=1} /^[0-9]+: / && !/^[0-9]+: (eth|ens|enp|eno)/ {iface=0} iface && /inet6/ && !/scope link/ {print $2}' | cut -d'/' -f1 | grep -vE '^f[0-9a-f]' | while read -r ip; do
                 echo "  $ip"
             done
         else
@@ -990,9 +991,10 @@ show_server_ip() {
         echo " "
         yellow "IPv6:"
         if ipv6_stack_available && ! ipv6_interfaces_have_value 1; then
-            # Показываем только IPv6 физических сетевых интерфейсов, исключаем link-local
+            # Показываем только IPv6 физических сетевых интерфейсов
+            # Исключаем все адреса начинающиеся на f (fe80, fc00, fd00, ff00 и т.д.)
             for iface in $(ifconfig -s 2>/dev/null | awk 'NR>1 && $1 ~ /^(eth|ens|enp|eno)/ {print $1}'); do
-                ifconfig "$iface" 2>/dev/null | grep 'inet6' | grep -v 'Scope:Link' | grep -v 'fe80:' | grep -oP '(?<=inet6\s)[0-9a-f:]+' | while read -r ip; do
+                ifconfig "$iface" 2>/dev/null | grep 'inet6' | grep -v 'Scope:Link' | grep -oP '(?<=inet6\s)[0-9a-f:]+' | grep -vE '^f[0-9a-f]' | while read -r ip; do
                     echo "  $ip"
                 done
             done

@@ -10,7 +10,7 @@ set -o pipefail
 # Переменные
 username=""
 USE_SUDO=""
-PROTECTION_VERSION="1.6.0"
+PROTECTION_VERSION="1.6.1"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 
 # ============================================================
@@ -955,19 +955,21 @@ ipv6_diagnostics() {
 }
 
 show_server_ip() {
-    green "IP-адреса сервера:"
+    green "IP-адреса сервера для доступа:"
     echo " "
     
     if command -v ip &>/dev/null; then
         yellow "IPv4:"
-        ip -4 addr show 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | while read -r ip; do
+        # Исключаем loopback (127.0.0.1) и link-local (169.254.x.x)
+        ip -4 addr show 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '^127\.' | grep -v '^169\.254\.' | while read -r ip; do
             echo "  $ip"
         done
         
         echo " "
         yellow "IPv6:"
         if ipv6_stack_available && ! ipv6_interfaces_have_value 1; then
-            ip -6 addr show 2>/dev/null | grep -oP '(?<=inet6\s)[0-9a-f:]+' | while read -r ip; do
+            # Исключаем loopback (::1) и link-local (fe80::)
+            ip -6 addr show 2>/dev/null | grep 'inet6' | grep -v 'scope link' | grep -v '::1' | grep -oP '(?<=inet6\s)[0-9a-f:]+' | while read -r ip; do
                 echo "  $ip"
             done
         else
@@ -975,14 +977,16 @@ show_server_ip() {
         fi
     elif command -v ifconfig &>/dev/null; then
         yellow "IPv4:"
-        ifconfig 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '127.0.0.1' | while read -r ip; do
+        # Исключаем loopback (127.0.0.1) и link-local (169.254.x.x)
+        ifconfig 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '^127\.' | grep -v '^169\.254\.' | while read -r ip; do
             echo "  $ip"
         done
         
         echo " "
         yellow "IPv6:"
         if ipv6_stack_available && ! ipv6_interfaces_have_value 1; then
-            ifconfig 2>/dev/null | grep -oP '(?<=inet6\s)[0-9a-f:]+' | while read -r ip; do
+            # Исключаем loopback и link-local через Scope:Link
+            ifconfig 2>/dev/null | grep 'inet6' | grep -v 'Scope:Link' | grep -oP '(?<=inet6\s)[0-9a-f:]+' | grep -v '^::1$' | grep -v '^fe80:' | while read -r ip; do
                 echo "  $ip"
             done
         else

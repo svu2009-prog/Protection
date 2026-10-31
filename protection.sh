@@ -10,7 +10,7 @@ set -o pipefail
 # Переменные
 username=""
 USE_SUDO=""
-PROTECTION_VERSION="1.6.2"
+PROTECTION_VERSION="1.6.3"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 
 # ============================================================
@@ -962,7 +962,8 @@ show_server_ip() {
         yellow "IPv4:"
         # Показываем только IP физических сетевых интерфейсов (eth, ens, enp, eno)
         # Исключаем loopback (lo), docker, virbr, veth, wg и т.д.
-        ip -4 addr show 2>/dev/null | awk '/^[0-9]+: (eth|ens|enp|eno)/ {iface=1} /^[0-9]+: / && !/^[0-9]+: (eth|ens|enp|eno)/ {iface=0} iface && /inet / {print $2}' | cut -d'/' -f1 | while read -r ip; do
+        # Исключаем Docker подсети: 172.17.0.0/16, 172.18.0.0/16, 10.0.0.0/8 (если используется Docker)
+        ip -4 addr show 2>/dev/null | awk '/^[0-9]+: (eth|ens|enp|eno)/ {iface=1} /^[0-9]+: / && !/^[0-9]+: (eth|ens|enp|eno)/ {iface=0} iface && /inet / {print $2}' | cut -d'/' -f1 | grep -v '^172\.1[67]\.' | grep -v '^172\.1[89]\.' | while read -r ip; do
             echo "  $ip"
         done
         
@@ -979,8 +980,9 @@ show_server_ip() {
     elif command -v ifconfig &>/dev/null; then
         yellow "IPv4:"
         # Показываем только IP физических сетевых интерфейсов
+        # Исключаем Docker подсети
         for iface in $(ifconfig -s 2>/dev/null | awk 'NR>1 && $1 ~ /^(eth|ens|enp|eno)/ {print $1}'); do
-            ifconfig "$iface" 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | while read -r ip; do
+            ifconfig "$iface" 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '^172\.1[67]\.' | grep -v '^172\.1[89]\.' | while read -r ip; do
                 echo "  $ip"
             done
         done

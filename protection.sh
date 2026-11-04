@@ -1,4 +1,4 @@
-﻿#!/bin/bash
+#!/bin/bash
 
 # Обёртка для совместимости: если скрипт запущен через sh, перезапустить через bash
 if [ -z "$BASH_VERSION" ]; then
@@ -20,7 +20,7 @@ set -o pipefail
 # Переменные
 username=""
 USE_SUDO=""
-PROTECTION_VERSION="1.6.7"
+PROTECTION_VERSION="1.6.8"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 
 # ============================================================

@@ -1,15 +1,7 @@
-﻿#!/usr/bin/env bash
-
-# Обёртка для совместимости: если скрипт запущен через sh, перезапустить через bash
-if [ -z "$BASH_VERSION" ]; then
-    if command -v bash >/dev/null 2>&1; then
-        exec bash "$0" "$@"
-    else
-        echo "Ошибка: bash не найден. Требуется bash 4.0+." >&2
-        exit 1
-    fi
-fi
-
+﻿#!/bin/sh
+# Этот скрипт требует bash. Если запущен через sh, автоматически перезапустится через bash.
+if [ -z "$BASH_VERSION" ]; then exec bash "$0" "$@" || { echo "Ошибка: bash не найден. Требуется bash 4.0+." >&2; exit 1; }; fi
+# Отсюда начинается bash-скрипт
 set -o pipefail
 
 # ============================================================
@@ -20,7 +12,7 @@ set -o pipefail
 # Переменные
 username=""
 USE_SUDO=""
-PROTECTION_VERSION="1.6.8"
+PROTECTION_VERSION="1.6.9"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 
 # ============================================================

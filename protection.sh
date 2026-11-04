@@ -1,6 +1,6 @@
-﻿:;exec bash "$0" "$@"
-#    ^^^--- Эта строка гарантирует запуск через bash независимо от интерпретатора
-# Если вы видите это сообщение, значит скрипт работает корректно
+﻿#!/bin/bash
+# shellcheck shell=bash
+# Запускайте: bash protection.sh или sudo bash protection.sh
 
 set -o pipefail
 
@@ -12,7 +12,7 @@ set -o pipefail
 # Переменные
 username=""
 USE_SUDO=""
-PROTECTION_VERSION="1.7.0"
+PROTECTION_VERSION="1.7.1"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 
 # ============================================================

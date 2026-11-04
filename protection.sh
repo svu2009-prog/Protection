@@ -20,7 +20,7 @@ set -o pipefail
 # Переменные
 username=""
 USE_SUDO=""
-PROTECTION_VERSION="1.6.6"
+PROTECTION_VERSION="1.6.7"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 
 # ============================================================
@@ -1677,18 +1677,15 @@ set_permit_root_login() {
         backup=$(mktemp "$(dirname "$sshd_dropin")/.00-protection.XXXXXX") || { red "Не удалось создать резервную копию SSH drop-in."; return 1; }
         cp -p -- "$sshd_dropin" "$backup" || { rm -f -- "$backup"; red "Не удалось создать резервную копию SSH drop-in."; return 1; }
     fi
-    if [[ -f "$sshd_dropin" ]]; then
-        if ! sed -i -E "/^[[:space:]]*PermitRootLogin[[:space:]]/d; 1iPermitRootLogin $value" "$sshd_dropin"; then
-            restore_sshd_dropin "$sshd_dropin" "$backup" "$existed" || red "Требуется ручная проверка конфигурации SSH после неудачного отката."
-            [[ -n "$backup" ]] && rm -f -- "$backup"
-            red "Не удалось изменить PermitRootLogin."
-            return 1
-        fi
-    elif ! printf 'PermitRootLogin %s\n' "$value" > "$sshd_dropin"; then
-        rm -f -- "$sshd_dropin"
+    
+    # Пишем значение в drop-in файл (перезаписываем, если существует)
+    if ! printf 'PermitRootLogin %s\n' "$value" > "$sshd_dropin"; then
+        restore_sshd_dropin "$sshd_dropin" "$backup" "$existed" || red "Требуется ручная проверка конфигурации SSH после неудачного отката."
+        [[ -n "$backup" ]] && rm -f -- "$backup"
         red "Не удалось изменить PermitRootLogin."
         return 1
     fi
+    
     if ! validate_and_restart_sshd; then
         red "Не удалось применить PermitRootLogin $value."
         restore_sshd_dropin "$sshd_dropin" "$backup" "$existed" || red "Требуется ручная проверка конфигурации SSH после неудачного отката."

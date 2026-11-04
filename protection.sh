@@ -1,6 +1,14 @@
 ﻿#!/bin/bash
-# shellcheck shell=bash
-# Запускайте: bash protection.sh или sudo bash protection.sh
+
+# Обёртка для совместимости: если скрипт запущен через sh, перезапустить через bash
+if [ -z "$BASH_VERSION" ]; then
+    if command -v bash >/dev/null 2>&1; then
+        exec bash "$0" "$@"
+    else
+        echo "Ошибка: bash не найден. Требуется bash 4.0+." >&2
+        exit 1
+    fi
+fi
 
 set -o pipefail
 
@@ -12,7 +20,7 @@ set -o pipefail
 # Переменные
 username=""
 USE_SUDO=""
-PROTECTION_VERSION="1.7.1"
+PROTECTION_VERSION="1.6.7"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 
 # ============================================================

@@ -1,4 +1,4 @@
-#!/bin/bash
+﻿#!/bin/bash
 
 set -o pipefail
 
@@ -10,7 +10,7 @@ set -o pipefail
 # Переменные
 username=""
 USE_SUDO=""
-PROTECTION_VERSION="1.6.4"
+PROTECTION_VERSION="1.6.5"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 
 # ============================================================
@@ -1313,10 +1313,43 @@ validate_and_restart_sshd() {
     return 1
 }
 
+# Удалить все строки PermitRootLogin из основного конфига (включая закомментированные).
+# Это гарантирует, что значение из drop-in (/etc/ssh/sshd_config.d/00-protection.conf) будет применено.
+cleanup_permitrootlogin_duplicates() {
+    local sshd_config="/etc/ssh/sshd_config"
+    local backup=""
+    
+    # Проверяем, есть ли строки с PermitRootLogin
+    if ! grep -qiE '^\s*#?\s*PermitRootLogin' "$sshd_config" 2>/dev/null; then
+        return 0  # Нет дубликатов, ничего не делаем
+    fi
+    
+    # Создаём резервную копию перед изменением
+    backup=$(mktemp "${sshd_config}.cleanup-XXXXXX") || return 1
+    cp -p -- "$sshd_config" "$backup" || { rm -f -- "$backup"; return 1; }
+    
+    # Удаляем ВСЕ строки (закомментированные и нет) содержащие PermitRootLogin
+    if ! sed -i -E '/^\s*#?\s*PermitRootLogin/d' "$sshd_config"; then
+        cp -p -- "$backup" "$sshd_config"
+        rm -f -- "$backup"
+        return 1
+    fi
+    
+    # Проверяем синтаксис конфига
+    if ! ${USE_SUDO:+$USE_SUDO }sshd -t 2>/dev/null; then
+        cp -p -- "$backup" "$sshd_config"
+        rm -f -- "$backup"
+        return 1
+    fi
+    
+    rm -f -- "$backup"
+    return 0
+}
 # Убедиться, что /etc/ssh/sshd_config содержит Include для sshd_config.d/*.conf
 _ensure_sshd_include() {
     local sshd_config="/etc/ssh/sshd_config"
     local include_line="Include /etc/ssh/sshd_config.d/*.conf"
+    cleanup_permitrootlogin_duplicates || return 1
     if ! grep -qE '^\s*Include\s+/etc/ssh/sshd_config\.d/\*\.conf' "$sshd_config" 2>/dev/null; then
         cp "$sshd_config" "${sshd_config}.bak" || { red "Не удалось создать резервную копию $sshd_config."; return 1; }
         printf '%s\n' "$include_line" | cat - "$sshd_config" > "${sshd_config}.tmp" && mv "${sshd_config}.tmp" "$sshd_config" || {

@@ -20,7 +20,7 @@ set -o pipefail
 # Переменные
 username=""
 USE_SUDO=""
-PROTECTION_VERSION="1.7.0"
+PROTECTION_VERSION="1.7.1"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 PROTECTION_UPDATE_URL="https://raw.githubusercontent.com/svu2009-prog/Protection/main/protection.sh"
 
@@ -211,7 +211,10 @@ check_for_updates() {
     fi
 
     rm -f "$temp_path"
-    green "Protection обновлён до версии $remote_version. Новая версия будет использована при следующем запуске."
+    green "Protection обновлён до версии $remote_version. Перезапускаем скрипт."
+    if ! exec "$PROTECTION_COMMAND_PATH" "$@"; then
+        red "Не удалось перезапустить обновлённый protection. Продолжаем текущую версию."
+    fi
 }
 
 # ============================================================
@@ -487,7 +490,7 @@ precheck() {
     fi
 
     ensure_global_command
-    check_for_updates
+    check_for_updates "$@"
     
     main
 }
@@ -3283,4 +3286,4 @@ main() {
 # ЗАПУСК СКРИПТА
 # ============================================================
 
-precheck
+precheck "$@"

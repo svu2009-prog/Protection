@@ -20,7 +20,7 @@ set -o pipefail
 # Переменные
 username=""
 USE_SUDO=""
-PROTECTION_VERSION="1.7.1"
+PROTECTION_VERSION="1.7.2"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 PROTECTION_UPDATE_URL="https://raw.githubusercontent.com/svu2009-prog/Protection/main/protection.sh"
 
@@ -169,19 +169,24 @@ ensure_global_command() {
 check_for_updates() {
     local temp_path remote_version version_status command_dir install_path
 
+    cyan "Проверяем наличие обновлений protection..."
+
     if command -v curl &>/dev/null; then
         temp_path="$(mktemp "${TMPDIR:-/tmp}/protection-update.XXXXXX" 2>/dev/null)" || return 0
         if ! curl -fsSL --connect-timeout 3 --max-time 8 -o "$temp_path" "$PROTECTION_UPDATE_URL" 2>/dev/null; then
             rm -f "$temp_path"
+            yellow "Не удалось проверить обновления. Продолжаем работу текущей версией."
             return 0
         fi
     elif command -v wget &>/dev/null; then
         temp_path="$(mktemp "${TMPDIR:-/tmp}/protection-update.XXXXXX" 2>/dev/null)" || return 0
         if ! wget -q --timeout=5 --tries=1 -O "$temp_path" "$PROTECTION_UPDATE_URL" 2>/dev/null; then
             rm -f "$temp_path"
+            yellow "Не удалось проверить обновления. Продолжаем работу текущей версией."
             return 0
         fi
     else
+        yellow "Не найден curl или wget. Проверка обновлений пропущена."
         return 0
     fi
 
@@ -189,6 +194,7 @@ check_for_updates() {
     version_status="$(compare_versions "$PROTECTION_VERSION" "$remote_version")"
     if [[ "$version_status" != "newer" ]]; then
         rm -f "$temp_path"
+        green "Установлена актуальная версия protection: $PROTECTION_VERSION"
         return 0
     fi
 

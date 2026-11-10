@@ -20,8 +20,9 @@ set -o pipefail
 # Переменные
 username=""
 USE_SUDO=""
-PROTECTION_VERSION="1.6.8"
+PROTECTION_VERSION="1.6.9"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
+PROTECTION_UPDATE_URL="https://raw.githubusercontent.com/svu2009-prog/Protection/main/protection.sh"
 
 # ============================================================
 # КОНФИГУРАЦИЯ ПО УМОЛЧАНИЮ
@@ -163,6 +164,54 @@ ensure_global_command() {
     fi
 
     purple "Глобальная команда protection обновлена: $PROTECTION_COMMAND_PATH"
+}
+
+check_for_updates() {
+    local temp_path remote_version version_status command_dir install_path
+
+    if command -v curl &>/dev/null; then
+        temp_path="$(mktemp "${TMPDIR:-/tmp}/protection-update.XXXXXX" 2>/dev/null)" || return 0
+        if ! curl -fsSL --connect-timeout 3 --max-time 8 -o "$temp_path" "$PROTECTION_UPDATE_URL" 2>/dev/null; then
+            rm -f "$temp_path"
+            return 0
+        fi
+    elif command -v wget &>/dev/null; then
+        temp_path="$(mktemp "${TMPDIR:-/tmp}/protection-update.XXXXXX" 2>/dev/null)" || return 0
+        if ! wget -q --timeout=5 --tries=1 -O "$temp_path" "$PROTECTION_UPDATE_URL" 2>/dev/null; then
+            rm -f "$temp_path"
+            return 0
+        fi
+    else
+        return 0
+    fi
+
+    remote_version="$(get_script_version "$temp_path")"
+    version_status="$(compare_versions "$PROTECTION_VERSION" "$remote_version")"
+    if [[ "$version_status" != "newer" ]]; then
+        rm -f "$temp_path"
+        return 0
+    fi
+
+    yellow "Доступно обновление protection: $PROTECTION_VERSION -> $remote_version"
+    if [[ "$(prompt_yes_no "Обновить protection сейчас?" "no")" != "yes" ]]; then
+        rm -f "$temp_path"
+        return 0
+    fi
+
+    command_dir="$(dirname "$PROTECTION_COMMAND_PATH")"
+    if ! ${USE_SUDO:+$USE_SUDO }mkdir -p "$command_dir" ||
+        ! install_path=$(${USE_SUDO:+$USE_SUDO }mktemp "$command_dir/.protection-update.XXXXXX") ||
+        ! ${USE_SUDO:+$USE_SUDO }cp "$temp_path" "$install_path" ||
+        ! ${USE_SUDO:+$USE_SUDO }chmod 755 "$install_path" ||
+        ! ${USE_SUDO:+$USE_SUDO }mv -f "$install_path" "$PROTECTION_COMMAND_PATH"; then
+        ${USE_SUDO:+$USE_SUDO }rm -f "$install_path"
+        red "Не удалось установить обновление protection. Продолжаем работу текущей версией."
+        rm -f "$temp_path"
+        return 0
+    fi
+
+    rm -f "$temp_path"
+    green "Protection обновлён до версии $remote_version. Новая версия будет использована при следующем запуске."
 }
 
 # ============================================================
@@ -438,6 +487,7 @@ precheck() {
     fi
 
     ensure_global_command
+    check_for_updates
     
     main
 }

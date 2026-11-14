@@ -20,7 +20,7 @@ set -o pipefail
 # Переменные
 username=""
 USE_SUDO=""
-PROTECTION_VERSION="1.7.2"
+PROTECTION_VERSION="1.7.3"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 PROTECTION_UPDATE_URL="https://raw.githubusercontent.com/svu2009-prog/Protection/main/protection.sh"
 
@@ -3167,7 +3167,7 @@ out_file() {
 show_help() {
     echo " "
     green "Справка (подробно):"
-    echo "1. Обновить пакеты — обновляет систему (apt update/upgrade). Возможные проблемы: перезапуск сервисов, сбои при обновлении."
+    echo "1. Обновить пакеты — apt-get update/upgrade + синхронизация protection с GitHub (svu2009-prog). Возможные проблемы: перезапуск сервисов, сбои при обновлении."
     echo "2. Поменять пароль ROOT — изменяет пароль root. Возможные проблемы: потеря доступа при забытом пароле."
     yellow "Рекомендуется: сохранить пароль в надежном месте."
     echo "3. Поменять порт SSH — меняет порт SSH и перезапускает службу. Возможные проблемы: потеря доступа, если порт закрыт в firewall."
@@ -3218,7 +3218,7 @@ main() {
     while true; do
         # shellcheck disable=SC2034 # Массивы читаются select_menu по имени через nameref.
         local main_menu_labels=(
-            "1. Обновить пакеты"
+            "1. Обновить пакеты и protection"
             "2. Поменять пароль ROOT"
             "3. Поменять порт SSH"
             "4. Управление пользователями"
@@ -3244,7 +3244,8 @@ main() {
                 break
                 ;;
             1)
-                ${USE_SUDO:+$USE_SUDO }apt update && ${USE_SUDO:+$USE_SUDO }apt upgrade -y && ${USE_SUDO:+$USE_SUDO }apt autoremove -y && ${USE_SUDO:+$USE_SUDO }apt clean
+                ${USE_SUDO:+$USE_SUDO }apt update && ${USE_SUDO:+$USE_SUDO }apt-get upgrade -y && ${USE_SUDO:+$USE_SUDO }apt autoremove -y && ${USE_SUDO:+$USE_SUDO }apt clean
+                check_for_updates
                 ;;
             2)
                 change_root_pass

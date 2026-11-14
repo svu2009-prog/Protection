@@ -20,7 +20,7 @@ set -o pipefail
 # Переменные
 username=""
 USE_SUDO=""
-PROTECTION_VERSION="1.7.5"
+PROTECTION_VERSION="1.7.6"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 PROTECTION_UPDATE_URL="https://raw.githubusercontent.com/svu2009-prog/Protection/main/protection.sh"
 
@@ -163,6 +163,7 @@ ensure_global_command() {
         return 1
     fi
 
+    remove_user_script_copy
     purple "Глобальная команда protection обновлена: $PROTECTION_COMMAND_PATH"
 }
 

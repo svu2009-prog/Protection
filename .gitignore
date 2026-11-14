@@ -3,7 +3,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-AGENTS.md
+# AGENTS.md is the repository's release and development policy.
 .agents/skills/
 
 # graphify generated output

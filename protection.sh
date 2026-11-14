@@ -20,7 +20,7 @@ set -o pipefail
 # Переменные
 username=""
 USE_SUDO=""
-PROTECTION_VERSION="1.7.4"
+PROTECTION_VERSION="1.7.5"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 PROTECTION_UPDATE_URL="https://raw.githubusercontent.com/svu2009-prog/Protection/main/protection.sh"
 
@@ -169,7 +169,7 @@ ensure_global_command() {
 remove_user_script_copy() {
     local run_user user_home script_copy
 
-    run_user="${SUDO_USER:-$USER}"
+    run_user="${SUDO_USER:-$(id -un)}"
     user_home="$(getent passwd "$run_user" | cut -d: -f6)"
     if [[ -z "$user_home" ]]; then
         return 0

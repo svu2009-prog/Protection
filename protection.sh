@@ -20,9 +20,16 @@ set -o pipefail
 # Переменные
 username=""
 USE_SUDO=""
-PROTECTION_VERSION="1.7.7"
+PROTECTION_VERSION="1.7.8"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 PROTECTION_UPDATE_URL="https://raw.githubusercontent.com/svu2009-prog/Protection/main/protection.sh"
+
+# SHA-256 хэши релизов добавляются вручную до публикации версии.
+# Не загружайте checksum из того же источника, что и сам скрипт.
+declare -A PROTECTION_UPDATE_SHA256=(
+    # Хэш считается по содержимому без этого блока, чтобы allowlist не менял сам хэш.
+    # ["1.7.9"]="<sha256 канонического содержимого релиза>"
+)
 
 # ============================================================
 # КОНФИГУРАЦИЯ ПО УМОЛЧАНИЮ
@@ -114,6 +121,15 @@ get_script_version() {
     echo "$ver"
 }
 
+get_script_sha256() {
+    local script_file=$1
+    awk '
+        /^declare -A PROTECTION_UPDATE_SHA256=/ {skip=1}
+        skip && /^\)/ {skip=0; next}
+        !skip {print}
+    ' "$script_file" | sha256sum | awk '{print $1}'
+}
+
 ensure_global_command() {
     local script_path installed_version version_status command_dir temp_path
 
@@ -157,34 +173,14 @@ ensure_global_command() {
 
     if ! ${USE_SUDO:+$USE_SUDO }cp "$script_path" "$temp_path" ||
         ! ${USE_SUDO:+$USE_SUDO }chmod 755 "$temp_path" ||
+        { [[ ! -f "$PROTECTION_COMMAND_PATH" ]] || ${USE_SUDO:+$USE_SUDO }cp -p "$PROTECTION_COMMAND_PATH" "${PROTECTION_COMMAND_PATH}.bak"; } ||
         ! ${USE_SUDO:+$USE_SUDO }mv -f "$temp_path" "$PROTECTION_COMMAND_PATH"; then
         ${USE_SUDO:+$USE_SUDO }rm -f "$temp_path"
         red "Не удалось атомарно установить глобальную команду $PROTECTION_COMMAND_PATH."
         return 1
     fi
 
-    remove_user_script_copy
     purple "Глобальная команда protection обновлена: $PROTECTION_COMMAND_PATH"
-}
-
-remove_user_script_copy() {
-    local run_user user_home script_copy current_script
-
-    user_home="${HOME:-}"
-    if [[ -n "${SUDO_USER:-}" ]]; then
-        run_user="$SUDO_USER"
-        user_home="$(getent passwd "$run_user" | cut -d: -f6)"
-    fi
-
-    current_script="$(resolve_current_script_path 2>/dev/null)"
-    for script_copy in "$user_home/protection.sh" "$current_script"; do
-        [[ -n "$script_copy" && "$script_copy" != "$PROTECTION_COMMAND_PATH" && -f "$script_copy" ]] || continue
-        if ${USE_SUDO:+$USE_SUDO }rm -f "$script_copy"; then
-            purple "Удалён локальный protection.sh: $script_copy"
-        else
-            yellow "Не удалось удалить $script_copy."
-        fi
-    done
 }
 
 check_for_updates() {
@@ -219,6 +215,21 @@ check_for_updates() {
         return 0
     fi
 
+    if ! command -v sha256sum &>/dev/null ||
+        [[ -z "${PROTECTION_UPDATE_SHA256[$remote_version]:-}" ]]; then
+        rm -f "$temp_path"
+        red "Обновление $remote_version отклонено: для версии нет доверенного SHA-256."
+        return 0
+    fi
+
+    local remote_sha256
+    remote_sha256="$(get_script_sha256 "$temp_path")"
+    if [[ "$remote_sha256" != "${PROTECTION_UPDATE_SHA256[$remote_version]}" ]]; then
+        rm -f "$temp_path"
+        red "Обновление $remote_version отклонено: SHA-256 не совпал."
+        return 0
+    fi
+
     yellow "Доступно обновление protection: $PROTECTION_VERSION -> $remote_version"
     if [[ "$(prompt_yes_no "Обновить protection сейчас?" "no")" != "yes" ]]; then
         rm -f "$temp_path"
@@ -230,6 +241,7 @@ check_for_updates() {
         ! install_path=$(${USE_SUDO:+$USE_SUDO }mktemp "$command_dir/.protection-update.XXXXXX") ||
         ! ${USE_SUDO:+$USE_SUDO }cp "$temp_path" "$install_path" ||
         ! ${USE_SUDO:+$USE_SUDO }chmod 755 "$install_path" ||
+        { [[ ! -f "$PROTECTION_COMMAND_PATH" ]] || ${USE_SUDO:+$USE_SUDO }cp -p "$PROTECTION_COMMAND_PATH" "${PROTECTION_COMMAND_PATH}.bak"; } ||
         ! ${USE_SUDO:+$USE_SUDO }mv -f "$install_path" "$PROTECTION_COMMAND_PATH"; then
         ${USE_SUDO:+$USE_SUDO }rm -f "$install_path"
         red "Не удалось установить обновление protection. Продолжаем работу текущей версией."
@@ -238,7 +250,6 @@ check_for_updates() {
     fi
 
     rm -f "$temp_path"
-    remove_user_script_copy
     green "Protection обновлён до версии $remote_version. Перезапускаем скрипт."
     if ! exec "$PROTECTION_COMMAND_PATH" "$@"; then
         red "Не удалось перезапустить обновлённый protection. Продолжаем текущую версию."
@@ -1253,7 +1264,8 @@ select_non_system_user() {
                     red "Имя пользователя не указано."
                     return 1
                 fi
-                if ! id "$manual_user" &>/dev/null; then
+                if ! id "$manual_user" &>/dev/null ||
+                    ! getent passwd "$manual_user" | awk -F: '$3 >= 1000 && $3 < 65534 && $7 !~ /(nologin|false|sync|halt|shutdown)$/ {found=1} END {exit !found}'; then
                     red "Пользователь $manual_user не существует."
                     return 1
                 fi
@@ -1358,9 +1370,28 @@ users_menu() {
             8)
                 if select_non_system_user; then
                     if [[ "$(prompt_yes_no "Удалить пользователя $SELECTED_USER и его домашний каталог?" "no")" == "yes" ]]; then
-                        if userdel -r "$SELECTED_USER" 2>/dev/null; then
+                        local sudoers_file="/etc/sudoers.d/$SELECTED_USER"
+                        local sudoers_backup=""
+                        if [[ -f "$sudoers_file" ]]; then
+                            sudoers_backup=$(mktemp "/etc/sudoers.d/.${SELECTED_USER}.delete.XXXXXX") || {
+                                red "Не удалось создать резервную копию sudoers-файла."
+                                continue
+                            }
+                            cp -p -- "$sudoers_file" "$sudoers_backup" || {
+                                rm -f -- "$sudoers_backup"
+                                red "Не удалось создать резервную копию sudoers-файла."
+                                continue
+                            }
+                            rm -f -- "$sudoers_file"
+                        fi
+                        if visudo -c >/dev/null 2>&1 && userdel -r "$SELECTED_USER" 2>/dev/null; then
+                            [[ -n "$sudoers_backup" ]] && rm -f -- "$sudoers_backup"
                             purple "Пользователь $SELECTED_USER удален."
                         else
+                            if [[ -n "$sudoers_backup" ]]; then
+                                cp -p -- "$sudoers_backup" "$sudoers_file"
+                                rm -f -- "$sudoers_backup"
+                            fi
                             red "Ошибка при удалении пользователя."
                         fi
                     fi
@@ -2948,7 +2979,7 @@ add_user_to_docker() {
 
 # Установка Docker
 install_docker() {
-    local installer_file
+    local docker_os docker_codename docker_arch docker_keyring docker_repo
 
     # Проверка наличия интернета
     if ! check_internet; then
@@ -2985,61 +3016,47 @@ install_docker() {
     if [[ "$(prompt_yes_no "Хотите установить Docker?" "no")" == "no" ]]; then
         return
     fi
-    if ! command -v curl &>/dev/null; then
-        green "Устанавливаем curl..."
-        ${USE_SUDO:+$USE_SUDO }apt-get update
-        ${USE_SUDO:+$USE_SUDO }apt-get install -y curl
-    fi
-    
-    if ! command -v curl &>/dev/null; then
-        if ! command -v wget &>/dev/null; then
-            green "Устанавливаем wget..."
-            ${USE_SUDO:+$USE_SUDO }apt-get update
-            ${USE_SUDO:+$USE_SUDO }apt-get install -y wget
-        fi
-    fi
-
-    local dl_cmd=""
-    if command -v curl &>/dev/null; then
-        dl_cmd="curl"
-    elif command -v wget &>/dev/null; then
-        dl_cmd="wget"
-    else
-        red "Не удалось найти curl или wget для загрузки установщика Docker."
+    if [[ ! -r /etc/os-release ]]; then
+        red "Не удалось определить дистрибутив: отсутствует /etc/os-release."
         return 1
     fi
-
-    if [[ "$dl_cmd" == "wget" ]]; then
-        green "curl недоступен, используем wget для установки Docker..."
-    else
-        green "Устанавливаем Docker..."
-        ${USE_SUDO:+$USE_SUDO }apt-get update
+    docker_os=$(awk -F= '$1 == "ID" {gsub(/"/, "", $2); print $2}' /etc/os-release)
+    docker_codename=$(awk -F= '$1 == "VERSION_CODENAME" {gsub(/"/, "", $2); print $2}' /etc/os-release)
+    docker_arch=$(dpkg --print-architecture 2>/dev/null)
+    if [[ "$docker_os" != "ubuntu" && "$docker_os" != "debian" ]] ||
+        [[ -z "$docker_codename" ]] || [[ -z "$docker_arch" ]]; then
+        red "Официальный Docker-репозиторий не поддерживается для этого окружения."
+        return 1
     fi
-    yellow "ВНИМАНИЕ: Следующая команда скачает и запустит скрипт с get.docker.com."
-    yellow "Убедитесь, что вы доверяете источнику, перед продолжением."
-    if [[ "$(prompt_yes_no "Загрузить и выполнить установщик Docker от get.docker.com?" "no")" == "no" ]]; then
+    if [[ "$(prompt_yes_no "Установить Docker из официального apt-репозитория Docker?" "no")" == "no" ]]; then
         return
     fi
-    if ! installer_file=$(mktemp); then
-        red "Не удалось создать временный файл для установщика Docker."
+
+    docker_keyring="/etc/apt/keyrings/docker.asc"
+    docker_repo="/etc/apt/sources.list.d/docker.list"
+    if ! ${USE_SUDO:+$USE_SUDO }apt-get update ||
+        ! ${USE_SUDO:+$USE_SUDO }apt-get install -yq ca-certificates curl; then
+        red "Не удалось установить зависимости Docker."
         return 1
     fi
-    if [[ "$dl_cmd" == "curl" ]]; then
-        curl -fsSL -o "$installer_file" https://get.docker.com
-    else
-        wget -q -O "$installer_file" https://get.docker.com
-    fi
-    if [[ ! -s "$installer_file" ]]; then
-        rm -f -- "$installer_file"
-        red "Не удалось загрузить установщик Docker."
+    if ! ${USE_SUDO:+$USE_SUDO }install -m 0755 -d /etc/apt/keyrings ||
+        ! curl -fsSL "https://download.docker.com/linux/$docker_os/gpg" | ${USE_SUDO:+$USE_SUDO }tee "$docker_keyring" >/dev/null ||
+        ! ${USE_SUDO:+$USE_SUDO }chmod a+r "$docker_keyring"; then
+        red "Не удалось установить ключ официального Docker-репозитория."
         return 1
     fi
-    if ! sh "$installer_file"; then
-        rm -f -- "$installer_file"
-        red "Ошибка при установке Docker через $dl_cmd."
+    printf 'deb [arch=%s signed-by=%s] https://download.docker.com/linux/%s %s stable\n' \
+        "$docker_arch" "$docker_keyring" "$docker_os" "$docker_codename" |
+        ${USE_SUDO:+$USE_SUDO }tee "$docker_repo" >/dev/null || {
+        red "Не удалось настроить Docker apt-репозиторий."
+        return 1
+    }
+    if ! ${USE_SUDO:+$USE_SUDO }apt-get update ||
+        ! ${USE_SUDO:+$USE_SUDO }apt-get install -yq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; then
+        red "Не удалось установить Docker из официального репозитория."
         return 1
     fi
-    rm -f -- "$installer_file"
+    ${USE_SUDO:+$USE_SUDO }systemctl enable --now docker 2>/dev/null || yellow "Docker установлен, но службу не удалось запустить."
 
     # Проверяем установку
     if docker --version &>/dev/null; then

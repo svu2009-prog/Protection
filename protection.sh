@@ -20,7 +20,7 @@ set -o pipefail
 # Переменные
 username=""
 USE_SUDO=""
-PROTECTION_VERSION="1.7.6"
+PROTECTION_VERSION="1.7.7"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 PROTECTION_UPDATE_URL="https://raw.githubusercontent.com/svu2009-prog/Protection/main/protection.sh"
 
@@ -168,22 +168,23 @@ ensure_global_command() {
 }
 
 remove_user_script_copy() {
-    local run_user user_home script_copy
+    local run_user user_home script_copy current_script
 
-    run_user="${SUDO_USER:-$(id -un)}"
-    user_home="$(getent passwd "$run_user" | cut -d: -f6)"
-    if [[ -z "$user_home" ]]; then
-        return 0
+    user_home="${HOME:-}"
+    if [[ -n "${SUDO_USER:-}" ]]; then
+        run_user="$SUDO_USER"
+        user_home="$(getent passwd "$run_user" | cut -d: -f6)"
     fi
 
-    script_copy="$user_home/protection.sh"
-    if [[ -f "$script_copy" ]]; then
+    current_script="$(resolve_current_script_path 2>/dev/null)"
+    for script_copy in "$user_home/protection.sh" "$current_script"; do
+        [[ -n "$script_copy" && "$script_copy" != "$PROTECTION_COMMAND_PATH" && -f "$script_copy" ]] || continue
         if ${USE_SUDO:+$USE_SUDO }rm -f "$script_copy"; then
-            purple "Удалён локальный protection.sh из $user_home"
+            purple "Удалён локальный protection.sh: $script_copy"
         else
             yellow "Не удалось удалить $script_copy."
         fi
-    fi
+    done
 }
 
 check_for_updates() {

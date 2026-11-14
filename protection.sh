@@ -20,7 +20,7 @@ set -o pipefail
 # Переменные
 username=""
 USE_SUDO=""
-PROTECTION_VERSION="1.7.3"
+PROTECTION_VERSION="1.7.4"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 PROTECTION_UPDATE_URL="https://raw.githubusercontent.com/svu2009-prog/Protection/main/protection.sh"
 
@@ -166,6 +166,25 @@ ensure_global_command() {
     purple "Глобальная команда protection обновлена: $PROTECTION_COMMAND_PATH"
 }
 
+remove_user_script_copy() {
+    local run_user user_home script_copy
+
+    run_user="${SUDO_USER:-$USER}"
+    user_home="$(getent passwd "$run_user" | cut -d: -f6)"
+    if [[ -z "$user_home" ]]; then
+        return 0
+    fi
+
+    script_copy="$user_home/protection.sh"
+    if [[ -f "$script_copy" ]]; then
+        if ${USE_SUDO:+$USE_SUDO }rm -f "$script_copy"; then
+            purple "Удалён локальный protection.sh из $user_home"
+        else
+            yellow "Не удалось удалить $script_copy."
+        fi
+    fi
+}
+
 check_for_updates() {
     local temp_path remote_version version_status command_dir install_path
 
@@ -217,6 +236,7 @@ check_for_updates() {
     fi
 
     rm -f "$temp_path"
+    remove_user_script_copy
     green "Protection обновлён до версии $remote_version. Перезапускаем скрипт."
     if ! exec "$PROTECTION_COMMAND_PATH" "$@"; then
         red "Не удалось перезапустить обновлённый protection. Продолжаем текущую версию."

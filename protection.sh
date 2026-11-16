@@ -20,7 +20,7 @@ set -o pipefail
 # Переменные
 username=""
 USE_SUDO=""
-PROTECTION_VERSION="1.7.10"
+PROTECTION_VERSION="1.7.11"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 PROTECTION_UPDATE_URL="https://raw.githubusercontent.com/svu2009-prog/Protection/main/protection.sh"
 
@@ -30,6 +30,7 @@ declare -A PROTECTION_UPDATE_SHA256=(
     # Хэш считается по содержимому без этого блока, чтобы allowlist не менял сам хэш.
     ["1.7.9"]="79a2f864d1f4d3c5c36e26e4a56ca35c375fb628e9d14630b3978242fa6367a7"
     ["1.7.10"]="58a2c5eba885a643264c947ad0ee42d1994a740ea6b1d7ebf2a60558b8ef676b"
+    ["1.7.11"]="09b9a71d4352f7232d0b9f2c4a4de15e3188f1ff8af5a0da595faa9cf871b20f"
 )
 
 # ============================================================
@@ -113,6 +114,12 @@ compare_versions() {
     fi
 }
 
+is_legacy_protection_version() {
+    local version=$1
+    [[ "$version" =~ ^[0-9]+(\.[0-9]+){0,2}$ ]] &&
+        [[ "$(compare_versions "1.7.8" "$version")" != "newer" ]]
+}
+
 get_script_version() {
     local script_file=$1 line ver
     line=$(grep -m1 '^PROTECTION_VERSION=' "$script_file" 2>/dev/null) || return 1
@@ -133,6 +140,7 @@ get_script_sha256() {
 
 ensure_global_command() {
     local script_path installed_version version_status command_dir temp_path
+    local legacy_version="no"
 
     if ! script_path="$(resolve_current_script_path)"; then
         yellow "Не удалось определить путь к текущему скрипту, команда protection не создана."
@@ -173,11 +181,33 @@ ensure_global_command() {
     fi
 
     if ! ${USE_SUDO:+$USE_SUDO }cp "$script_path" "$temp_path" ||
-        ! ${USE_SUDO:+$USE_SUDO }chmod 755 "$temp_path" ||
-        { [[ ! -f "$PROTECTION_COMMAND_PATH" ]] || ${USE_SUDO:+$USE_SUDO }cp -p "$PROTECTION_COMMAND_PATH" "${PROTECTION_COMMAND_PATH}.bak"; } ||
-        ! ${USE_SUDO:+$USE_SUDO }mv -f "$temp_path" "$PROTECTION_COMMAND_PATH"; then
+        ! ${USE_SUDO:+$USE_SUDO }chmod 755 "$temp_path"; then
         ${USE_SUDO:+$USE_SUDO }rm -f "$temp_path"
         red "Не удалось атомарно установить глобальную команду $PROTECTION_COMMAND_PATH."
+        return 1
+    fi
+
+    if is_legacy_protection_version "$installed_version"; then
+        legacy_version="yes"
+    fi
+    if [[ -f "$PROTECTION_COMMAND_PATH" ]] &&
+        ! ${USE_SUDO:+$USE_SUDO }cp -p "$PROTECTION_COMMAND_PATH" "${PROTECTION_COMMAND_PATH}.bak"; then
+        ${USE_SUDO:+$USE_SUDO }rm -f "$temp_path"
+        red "Не удалось создать резервную копию $PROTECTION_COMMAND_PATH."
+        return 1
+    fi
+    if [[ "$legacy_version" == "yes" ]] &&
+        ! ${USE_SUDO:+$USE_SUDO }rm -f "$PROTECTION_COMMAND_PATH"; then
+        ${USE_SUDO:+$USE_SUDO }rm -f "$temp_path"
+        red "Не удалось удалить устаревшую версию $PROTECTION_COMMAND_PATH."
+        return 1
+    fi
+    if ! ${USE_SUDO:+$USE_SUDO }mv -f "$temp_path" "$PROTECTION_COMMAND_PATH"; then
+        if [[ "$legacy_version" == "yes" && -f "${PROTECTION_COMMAND_PATH}.bak" ]]; then
+            ${USE_SUDO:+$USE_SUDO }cp -p "${PROTECTION_COMMAND_PATH}.bak" "$PROTECTION_COMMAND_PATH"
+        fi
+        ${USE_SUDO:+$USE_SUDO }rm -f "$temp_path"
+        red "Не удалось установить глобальную команду $PROTECTION_COMMAND_PATH."
         return 1
     fi
 
@@ -186,6 +216,7 @@ ensure_global_command() {
 
 check_for_updates() {
     local temp_path remote_version version_status command_dir install_path
+    local installed_version legacy_version="no"
 
     cyan "Проверяем наличие обновлений protection..."
 
@@ -247,8 +278,28 @@ check_for_updates() {
         ! install_path=$(${USE_SUDO:+$USE_SUDO }mktemp "$command_dir/.protection-update.XXXXXX") ||
         ! ${USE_SUDO:+$USE_SUDO }cp "$temp_path" "$install_path" ||
         ! ${USE_SUDO:+$USE_SUDO }chmod 755 "$install_path" ||
-        { [[ ! -f "$PROTECTION_COMMAND_PATH" ]] || ${USE_SUDO:+$USE_SUDO }cp -p "$PROTECTION_COMMAND_PATH" "${PROTECTION_COMMAND_PATH}.bak"; } ||
-        ! ${USE_SUDO:+$USE_SUDO }mv -f "$install_path" "$PROTECTION_COMMAND_PATH"; then
+        { [[ ! -f "$PROTECTION_COMMAND_PATH" ]] || ${USE_SUDO:+$USE_SUDO }cp -p "$PROTECTION_COMMAND_PATH" "${PROTECTION_COMMAND_PATH}.bak"; }; then
+        ${USE_SUDO:+$USE_SUDO }rm -f "$install_path"
+        red "Не удалось установить обновление protection. Продолжаем работу текущей версией."
+        rm -f "$temp_path"
+        return 0
+    fi
+
+    installed_version="$(get_script_version "$PROTECTION_COMMAND_PATH")"
+    if is_legacy_protection_version "$installed_version"; then
+        legacy_version="yes"
+    fi
+    if [[ "$legacy_version" == "yes" ]] &&
+        ! ${USE_SUDO:+$USE_SUDO }rm -f "$PROTECTION_COMMAND_PATH"; then
+        ${USE_SUDO:+$USE_SUDO }rm -f "$install_path"
+        red "Не удалось удалить устаревшую версию $PROTECTION_COMMAND_PATH."
+        rm -f "$temp_path"
+        return 0
+    fi
+    if ! ${USE_SUDO:+$USE_SUDO }mv -f "$install_path" "$PROTECTION_COMMAND_PATH"; then
+        if [[ "$legacy_version" == "yes" && -f "${PROTECTION_COMMAND_PATH}.bak" ]]; then
+            ${USE_SUDO:+$USE_SUDO }cp -p "${PROTECTION_COMMAND_PATH}.bak" "$PROTECTION_COMMAND_PATH"
+        fi
         ${USE_SUDO:+$USE_SUDO }rm -f "$install_path"
         red "Не удалось установить обновление protection. Продолжаем работу текущей версией."
         rm -f "$temp_path"

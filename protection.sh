@@ -20,7 +20,7 @@ set -o pipefail
 # Переменные
 username=""
 USE_SUDO=""
-PROTECTION_VERSION="1.7.9"
+PROTECTION_VERSION="1.7.10"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 PROTECTION_UPDATE_URL="https://raw.githubusercontent.com/svu2009-prog/Protection/main/protection.sh"
 
@@ -29,6 +29,7 @@ PROTECTION_UPDATE_URL="https://raw.githubusercontent.com/svu2009-prog/Protection
 declare -A PROTECTION_UPDATE_SHA256=(
     # Хэш считается по содержимому без этого блока, чтобы allowlist не менял сам хэш.
     ["1.7.9"]="79a2f864d1f4d3c5c36e26e4a56ca35c375fb628e9d14630b3978242fa6367a7"
+    ["1.7.10"]="58a2c5eba885a643264c947ad0ee42d1994a740ea6b1d7ebf2a60558b8ef676b"
 )
 
 # ============================================================
@@ -215,19 +216,24 @@ check_for_updates() {
         return 0
     fi
 
-    if ! command -v sha256sum &>/dev/null ||
-        [[ -z "${PROTECTION_UPDATE_SHA256[$remote_version]:-}" ]]; then
+    if ! command -v sha256sum &>/dev/null; then
         rm -f "$temp_path"
-        red "Обновление $remote_version отклонено: для версии нет доверенного SHA-256."
+        red "Обновление $remote_version отклонено: sha256sum не найден."
         return 0
     fi
 
     local remote_sha256
     remote_sha256="$(get_script_sha256 "$temp_path")"
-    if [[ "$remote_sha256" != "${PROTECTION_UPDATE_SHA256[$remote_version]}" ]]; then
+    if [[ -n "${PROTECTION_UPDATE_SHA256[$remote_version]:-}" &&
+        "$remote_sha256" != "${PROTECTION_UPDATE_SHA256[$remote_version]}" ]]; then
         rm -f "$temp_path"
         red "Обновление $remote_version отклонено: SHA-256 не совпал."
         return 0
+    fi
+
+    if [[ -z "${PROTECTION_UPDATE_SHA256[$remote_version]:-}" ]]; then
+        yellow "Для версии $remote_version нет заранее сохраненного SHA-256."
+        yellow "Файл получен по HTTPS и будет установлен только после вашего подтверждения."
     fi
 
     yellow "Доступно обновление protection: $PROTECTION_VERSION -> $remote_version"

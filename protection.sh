@@ -20,7 +20,7 @@ set -o pipefail
 # Переменные
 username=""
 USE_SUDO=""
-PROTECTION_VERSION="1.7.12"
+PROTECTION_VERSION="1.7.13"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 PROTECTION_UPDATE_URL="https://raw.githubusercontent.com/svu2009-prog/Protection/main/protection.sh"
 
@@ -32,6 +32,7 @@ declare -A PROTECTION_UPDATE_SHA256=(
     ["1.7.10"]="58a2c5eba885a643264c947ad0ee42d1994a740ea6b1d7ebf2a60558b8ef676b"
     ["1.7.11"]="09b9a71d4352f7232d0b9f2c4a4de15e3188f1ff8af5a0da595faa9cf871b20f"
     ["1.7.12"]="6f575a7535975e784eda170f9d8f1171cc4dd50b797dc7bbd3277fdf295bd9b1"
+    ["1.7.13"]="d32572aa632be10bb9fb0cd02a3e8005174cbc748e0a0703f1a9b1eff4a578b4"
 )
 
 # ============================================================
@@ -1923,7 +1924,7 @@ disable_root_ssh() {
 # Изменение порта SSH
 change_port_ssh() {
     local NEW_SSH_PORT sshd_dropin backup existed ufw_rule_added CURRENT_SSH_PORT
-    local effective_ssh_ports
+    local effective_ssh_ports ssh_socket_active socket_dropin socket_backup socket_existed
     CURRENT_SSH_PORT=$(get_ssh_port)
     
     if [[ "$(prompt_yes_no "Порт SSH = $CURRENT_SSH_PORT, хотите изменить его?" "no")" == "no" ]]; then
@@ -1938,16 +1939,33 @@ change_port_ssh() {
                 red "Порт $NEW_SSH_PORT уже занят. Выберите другой."
                 continue
             fi
+            ssh_socket_active="no"
+            socket_dropin="/etc/systemd/system/ssh.socket.d/zz-protection-port.conf"
+            socket_backup=""
+            socket_existed="no"
             if ${USE_SUDO:+$USE_SUDO }systemctl is-active --quiet ssh.socket 2>/dev/null; then
-                red "Обнаружена socket-активация ssh.socket. Изменение порта отменено: отключите socket-активацию и повторите попытку."
-                return 1
+                ssh_socket_active="yes"
+                if [[ -f "$socket_dropin" ]]; then
+                    socket_existed="yes"
+                    socket_backup=$(mktemp "${socket_dropin}.XXXXXX") || {
+                        red "Не удалось создать резервную копию systemd socket override."
+                        return 1
+                    }
+                    if ! cp -p -- "$socket_dropin" "$socket_backup"; then
+                        rm -f -- "$socket_backup"
+                        red "Не удалось создать резервную копию systemd socket override."
+                        return 1
+                    fi
+                fi
             fi
             sshd_dropin="/etc/ssh/sshd_config.d/00-protection.conf"
             mkdir -p "$(dirname "$sshd_dropin")" || {
+                [[ -n "$socket_backup" ]] && rm -f -- "$socket_backup"
                 red "Не удалось создать каталог drop-in SSH."
                 return 1
             }
             if ! _ensure_sshd_include; then
+                [[ -n "$socket_backup" ]] && rm -f -- "$socket_backup"
                 return 1
             fi
             backup=""
@@ -1956,11 +1974,13 @@ change_port_ssh() {
             if [[ -f "$sshd_dropin" ]]; then
                 existed="yes"
                 backup=$(mktemp "$(dirname "$sshd_dropin")/.00-protection.XXXXXX") || {
+                    [[ -n "$socket_backup" ]] && rm -f -- "$socket_backup"
                     red "Не удалось создать резервную копию SSH drop-in."
                     return 1
                 }
                 if ! cp -p -- "$sshd_dropin" "$backup"; then
                     rm -f -- "$backup"
+                    [[ -n "$socket_backup" ]] && rm -f -- "$socket_backup"
                     red "Не удалось создать резервную копию SSH drop-in."
                     return 1
                 fi
@@ -1973,24 +1993,47 @@ change_port_ssh() {
                 fi
                 if ! ufw_allow_port "$NEW_SSH_PORT" tcp; then
                     [[ -n "$backup" ]] && rm -f -- "$backup"
+                    [[ -n "$socket_backup" ]] && rm -f -- "$socket_backup"
                     red "Не удалось открыть порт $NEW_SSH_PORT/tcp в UFW. SSH-конфигурация не изменена."
                     return 1
                 fi
             fi
 
             if [[ -f "$sshd_dropin" ]]; then
-                if ! sed -i -E "/^[[:space:]]*Port[[:space:]]/d; 1iPort $NEW_SSH_PORT" "$sshd_dropin"; then
+                if ! sed -i -E "/^[[:space:]]*Port[[:space:]]/d; /^[[:space:]]*AddressFamily[[:space:]]/d; 1iAddressFamily inet\nPort $NEW_SSH_PORT" "$sshd_dropin"; then
                     restore_sshd_dropin "$sshd_dropin" "$backup" "$existed" || red "Требуется ручная проверка конфигурации SSH после неудачного отката."
                     [[ "$ufw_rule_added" == "yes" ]] && echo "y" | ${USE_SUDO:+$USE_SUDO }ufw delete allow "$NEW_SSH_PORT/tcp" >/dev/null 2>&1
                     [[ -n "$backup" ]] && rm -f -- "$backup"
+                    [[ -n "$socket_backup" ]] && rm -f -- "$socket_backup"
                     red "Не удалось изменить порт SSH."
                     return 1
                 fi
-            elif ! printf 'Port %s\n' "$NEW_SSH_PORT" > "$sshd_dropin"; then
+            elif ! printf 'AddressFamily inet\nPort %s\n' "$NEW_SSH_PORT" > "$sshd_dropin"; then
                 rm -f -- "$sshd_dropin"
                 [[ "$ufw_rule_added" == "yes" ]] && echo "y" | ${USE_SUDO:+$USE_SUDO }ufw delete allow "$NEW_SSH_PORT/tcp" >/dev/null 2>&1
                 [[ -n "$backup" ]] && rm -f -- "$backup"
+                [[ -n "$socket_backup" ]] && rm -f -- "$socket_backup"
                 red "Не удалось изменить порт SSH."
+                return 1
+            fi
+
+            if [[ "$ssh_socket_active" == "yes" ]] && {
+                ! mkdir -p "$(dirname "$socket_dropin")" ||
+                ! printf '[Socket]\nListenStream=\nListenStream=0.0.0.0:%s\n' "$NEW_SSH_PORT" > "$socket_dropin" ||
+                ! ${USE_SUDO:+$USE_SUDO }systemctl daemon-reload ||
+                ! ${USE_SUDO:+$USE_SUDO }systemctl restart ssh.socket;
+            }; then
+                if [[ "$socket_existed" == "yes" ]]; then
+                    cp -p -- "$socket_backup" "$socket_dropin"
+                else
+                    rm -f -- "$socket_dropin"
+                fi
+                ${USE_SUDO:+$USE_SUDO }systemctl daemon-reload >/dev/null 2>&1
+                ${USE_SUDO:+$USE_SUDO }systemctl restart ssh.socket >/dev/null 2>&1
+                restore_sshd_dropin "$sshd_dropin" "$backup" "$existed" >/dev/null 2>&1
+                [[ -n "$backup" ]] && rm -f -- "$backup"
+                [[ -n "$socket_backup" ]] && rm -f -- "$socket_backup"
+                red "Не удалось применить IPv4-порт $NEW_SSH_PORT к systemd ssh.socket."
                 return 1
             fi
 
@@ -1998,19 +2041,32 @@ change_port_ssh() {
             if ! validate_and_restart_sshd; then
                 red "Не удалось применить новый порт SSH. Проверьте конфигурацию вручную."
                 restore_sshd_dropin "$sshd_dropin" "$backup" "$existed" || red "Требуется ручная проверка конфигурации SSH после неудачного отката."
+                if [[ "$ssh_socket_active" == "yes" ]]; then
+                    if [[ "$socket_existed" == "yes" ]]; then cp -p -- "$socket_backup" "$socket_dropin"; else rm -f -- "$socket_dropin"; fi
+                    ${USE_SUDO:+$USE_SUDO }systemctl daemon-reload >/dev/null 2>&1
+                    ${USE_SUDO:+$USE_SUDO }systemctl restart ssh.socket >/dev/null 2>&1
+                fi
                 [[ "$ufw_rule_added" == "yes" ]] && echo "y" | ${USE_SUDO:+$USE_SUDO }ufw delete allow "$NEW_SSH_PORT/tcp" >/dev/null 2>&1
                 [[ -n "$backup" ]] && rm -f -- "$backup"
+                [[ -n "$socket_backup" ]] && rm -f -- "$socket_backup"
                 return 1
             fi
             effective_ssh_ports=$(sshd -T 2>/dev/null | awk '$1 == "port" {print $2}')
             if ! printf '%s\n' "$effective_ssh_ports" | grep -Fxq "$NEW_SSH_PORT" || ! port_in_use "$NEW_SSH_PORT"; then
                 red "Эффективный порт SSH не совпал с ожидаемым: $NEW_SSH_PORT."
                 restore_sshd_dropin "$sshd_dropin" "$backup" "$existed" || red "Требуется ручная проверка конфигурации SSH после неудачного отката."
+                if [[ "$ssh_socket_active" == "yes" ]]; then
+                    if [[ "$socket_existed" == "yes" ]]; then cp -p -- "$socket_backup" "$socket_dropin"; else rm -f -- "$socket_dropin"; fi
+                    ${USE_SUDO:+$USE_SUDO }systemctl daemon-reload >/dev/null 2>&1
+                    ${USE_SUDO:+$USE_SUDO }systemctl restart ssh.socket >/dev/null 2>&1
+                fi
                 [[ "$ufw_rule_added" == "yes" ]] && echo "y" | ${USE_SUDO:+$USE_SUDO }ufw delete allow "$NEW_SSH_PORT/tcp" >/dev/null 2>&1
                 [[ -n "$backup" ]] && rm -f -- "$backup"
+                [[ -n "$socket_backup" ]] && rm -f -- "$socket_backup"
                 return 1
             fi
             [[ -n "$backup" ]] && rm -f -- "$backup"
+            [[ -n "$socket_backup" ]] && rm -f -- "$socket_backup"
 
             purple "Порт SSH изменен на $NEW_SSH_PORT."
             if [[ -f /etc/fail2ban/jail.local ]] && ! grep -qE "^port = $NEW_SSH_PORT$" /etc/fail2ban/jail.local; then

@@ -20,7 +20,7 @@ set -o pipefail
 # Переменные
 username=""
 USE_SUDO=""
-PROTECTION_VERSION="1.7.15"
+PROTECTION_VERSION="1.7.16"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 PROTECTION_UPDATE_URL="https://raw.githubusercontent.com/svu2009-prog/Protection/main/protection.sh"
 
@@ -35,6 +35,7 @@ declare -A PROTECTION_UPDATE_SHA256=(
     ["1.7.13"]="d32572aa632be10bb9fb0cd02a3e8005174cbc748e0a0703f1a9b1eff4a578b4"
     ["1.7.14"]="4742477b8f77e5519ab71d8e78971dcd50e3086b8260fc784456fabf40f35754"
     ["1.7.15"]="81c071e8b5e9573d0fd929b98328974c309e08ba1cce88a63309464f49df2ce1"
+    ["1.7.16"]="6f80798f454891a81fece20e7c1f5ce5f58e10d7b89caf0658e4f36eb3235a7b"
 )
 
 # ============================================================
@@ -1945,7 +1946,7 @@ disable_root_ssh() {
 # Изменение порта SSH
 change_port_ssh() {
     local NEW_SSH_PORT sshd_dropin backup existed ufw_rule_added CURRENT_SSH_PORT
-    local effective_ssh_ports ssh_socket_active socket_dropin socket_backup socket_existed
+    local effective_ssh_ports ssh_socket_active socket_dropin socket_backup socket_existed port_ready
     CURRENT_SSH_PORT=$(get_ssh_port)
     
     if [[ "$(prompt_yes_no "Порт SSH = $CURRENT_SSH_PORT, хотите изменить его?" "no")" == "no" ]]; then
@@ -2058,8 +2059,14 @@ change_port_ssh() {
                 return 1
             fi
 
-            # Перезапускаем SSH с проверкой конфигурации и авто-откатом.
-            if ! validate_and_restart_sshd; then
+            # При socket-активации ssh.socket уже запустил ssh.service. Повторный
+            # restart ssh.service закрывает переданный systemd socket и ломает listener.
+            if [[ "$ssh_socket_active" == "yes" ]]; then
+                sshd -t 2>/dev/null
+            else
+                validate_and_restart_sshd
+            fi
+            if [[ $? -ne 0 ]]; then
                 red "Не удалось применить новый порт SSH. Проверьте конфигурацию вручную."
                 restore_sshd_dropin "$sshd_dropin" "$backup" "$existed" || red "Требуется ручная проверка конфигурации SSH после неудачного отката."
                 if [[ "$ssh_socket_active" == "yes" ]]; then
@@ -2073,7 +2080,15 @@ change_port_ssh() {
                 return 1
             fi
             effective_ssh_ports=$(sshd -T 2>/dev/null | awk '$1 == "port" {print $2}')
-            if ! printf '%s\n' "$effective_ssh_ports" | grep -Fxq "$NEW_SSH_PORT" || ! port_in_use "$NEW_SSH_PORT"; then
+            port_ready="no"
+            for _ in {1..10}; do
+                if printf '%s\n' "$effective_ssh_ports" | grep -Fxq "$NEW_SSH_PORT" && port_in_use "$NEW_SSH_PORT"; then
+                    port_ready="yes"
+                    break
+                fi
+                sleep 0.2
+            done
+            if [[ "$port_ready" != "yes" ]]; then
                 red "Эффективный порт SSH не совпал с ожидаемым: $NEW_SSH_PORT."
                 restore_sshd_dropin "$sshd_dropin" "$backup" "$existed" || red "Требуется ручная проверка конфигурации SSH после неудачного отката."
                 if [[ "$ssh_socket_active" == "yes" ]]; then

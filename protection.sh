@@ -20,7 +20,7 @@ set -o pipefail
 # Переменные
 username=""
 USE_SUDO=""
-PROTECTION_VERSION="1.7.17"
+PROTECTION_VERSION="1.7.18"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 PROTECTION_UPDATE_URL="https://raw.githubusercontent.com/svu2009-prog/Protection/main/protection.sh"
 
@@ -37,6 +37,7 @@ declare -A PROTECTION_UPDATE_SHA256=(
     ["1.7.15"]="81c071e8b5e9573d0fd929b98328974c309e08ba1cce88a63309464f49df2ce1"
     ["1.7.16"]="6f80798f454891a81fece20e7c1f5ce5f58e10d7b89caf0658e4f36eb3235a7b"
     ["1.7.17"]="4285591e2a6a95eb3702a12cec56b4c1d3503676d2d11899de76858b81a832f2"
+    ["1.7.18"]="a309181196f57e5074d4192c2f777f2884d11a35d4c2ce72b440f78ed5e68a83"
 )
 
 # ============================================================
@@ -2082,8 +2083,13 @@ change_port_ssh() {
             fi
             port_ready="no"
             for _ in {1..10}; do
-                effective_ssh_ports=$(sshd -T 2>/dev/null | awk '$1 == "port" {print $2}')
-                if printf '%s\n' "$effective_ssh_ports" | grep -Fxq "$NEW_SSH_PORT" && port_in_use "$NEW_SSH_PORT"; then
+                if [[ "$ssh_socket_active" == "yes" ]]; then
+                    port_in_use "$NEW_SSH_PORT"
+                else
+                    effective_ssh_ports=$(sshd -T 2>/dev/null | awk '$1 == "port" {print $2}')
+                    printf '%s\n' "$effective_ssh_ports" | grep -Fxq "$NEW_SSH_PORT" && port_in_use "$NEW_SSH_PORT"
+                fi
+                if [[ $? -eq 0 ]]; then
                     port_ready="yes"
                     break
                 fi

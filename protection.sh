@@ -20,7 +20,7 @@ set -o pipefail
 # Переменные
 username=""
 USE_SUDO=""
-PROTECTION_VERSION="1.7.14"
+PROTECTION_VERSION="1.7.15"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 PROTECTION_UPDATE_URL="https://raw.githubusercontent.com/svu2009-prog/Protection/main/protection.sh"
 
@@ -34,6 +34,7 @@ declare -A PROTECTION_UPDATE_SHA256=(
     ["1.7.12"]="6f575a7535975e784eda170f9d8f1171cc4dd50b797dc7bbd3277fdf295bd9b1"
     ["1.7.13"]="d32572aa632be10bb9fb0cd02a3e8005174cbc748e0a0703f1a9b1eff4a578b4"
     ["1.7.14"]="4742477b8f77e5519ab71d8e78971dcd50e3086b8260fc784456fabf40f35754"
+    ["1.7.15"]="81c071e8b5e9573d0fd929b98328974c309e08ba1cce88a63309464f49df2ce1"
 )
 
 # ============================================================
@@ -555,11 +556,11 @@ check_internet() {
 port_in_use() {
     local port=$1
     if command -v ss &>/dev/null; then
-        ss -ltn "sport = :$port" 2>/dev/null | grep -q ":$port"
+        ss -H -ltn 2>/dev/null | awk -v port=":$port" '$4 ~ (port "$") { found=1 } END { exit !found }'
         return $?
     fi
     if command -v netstat &>/dev/null; then
-        netstat -ltn 2>/dev/null | awk '{print $4}' | grep -qE ":$port\$"
+        netstat -ltn 2>/dev/null | awk -v port=":$port" '$4 ~ (port "$") { found=1 } END { exit !found }'
         return $?
     fi
     return 1

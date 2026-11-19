@@ -20,7 +20,7 @@ set -o pipefail
 # Переменные
 username=""
 USE_SUDO=""
-PROTECTION_VERSION="1.7.13"
+PROTECTION_VERSION="1.7.14"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 PROTECTION_UPDATE_URL="https://raw.githubusercontent.com/svu2009-prog/Protection/main/protection.sh"
 
@@ -33,6 +33,7 @@ declare -A PROTECTION_UPDATE_SHA256=(
     ["1.7.11"]="09b9a71d4352f7232d0b9f2c4a4de15e3188f1ff8af5a0da595faa9cf871b20f"
     ["1.7.12"]="6f575a7535975e784eda170f9d8f1171cc4dd50b797dc7bbd3277fdf295bd9b1"
     ["1.7.13"]="d32572aa632be10bb9fb0cd02a3e8005174cbc748e0a0703f1a9b1eff4a578b4"
+    ["1.7.14"]="4742477b8f77e5519ab71d8e78971dcd50e3086b8260fc784456fabf40f35754"
 )
 
 # ============================================================
@@ -276,13 +277,32 @@ check_for_updates() {
     fi
 
     command_dir="$(dirname "$PROTECTION_COMMAND_PATH")"
-    if ! ${USE_SUDO:+$USE_SUDO }mkdir -p "$command_dir" ||
-        ! install_path=$(${USE_SUDO:+$USE_SUDO }mktemp "$command_dir/.protection-update.XXXXXX") ||
-        ! ${USE_SUDO:+$USE_SUDO }cp "$temp_path" "$install_path" ||
-        ! ${USE_SUDO:+$USE_SUDO }chmod 755 "$install_path" ||
-        { [[ ! -f "$PROTECTION_COMMAND_PATH" ]] || ${USE_SUDO:+$USE_SUDO }cp -p "$PROTECTION_COMMAND_PATH" "${PROTECTION_COMMAND_PATH}.bak"; }; then
-        ${USE_SUDO:+$USE_SUDO }rm -f "$install_path"
-        red "Не удалось установить обновление protection. Продолжаем работу текущей версией."
+    if ! ${USE_SUDO:+$USE_SUDO }mkdir -p "$command_dir"; then
+        red "Не удалось создать каталог $command_dir для обновления protection."
+        rm -f "$temp_path"
+        return 0
+    fi
+    if ! install_path=$(${USE_SUDO:+$USE_SUDO }mktemp "$command_dir/.protection-update.XXXXXX"); then
+        red "Не удалось создать временный файл для обновления protection."
+        rm -f "$temp_path"
+        return 0
+    fi
+    if ! ${USE_SUDO:+$USE_SUDO }install -m 0755 "$temp_path" "$install_path"; then
+        ${USE_SUDO:+$USE_SUDO }rm -f -- "$install_path"
+        red "Не удалось скопировать обновление protection во временный файл."
+        rm -f "$temp_path"
+        return 0
+    fi
+    if ! get_script_version "$install_path" >/dev/null; then
+        ${USE_SUDO:+$USE_SUDO }rm -f -- "$install_path"
+        red "Скачанный файл обновления protection повреждён или не является скриптом."
+        rm -f "$temp_path"
+        return 0
+    fi
+    if [[ -f "$PROTECTION_COMMAND_PATH" ]] &&
+        ! ${USE_SUDO:+$USE_SUDO }cp -p -- "$PROTECTION_COMMAND_PATH" "${PROTECTION_COMMAND_PATH}.bak"; then
+        ${USE_SUDO:+$USE_SUDO }rm -f -- "$install_path"
+        red "Не удалось создать резервную копию $PROTECTION_COMMAND_PATH."
         rm -f "$temp_path"
         return 0
     fi
@@ -293,16 +313,16 @@ check_for_updates() {
     fi
     if [[ "$legacy_version" == "yes" ]] &&
         ! ${USE_SUDO:+$USE_SUDO }rm -f "$PROTECTION_COMMAND_PATH"; then
-        ${USE_SUDO:+$USE_SUDO }rm -f "$install_path"
+        ${USE_SUDO:+$USE_SUDO }rm -f -- "$install_path"
         red "Не удалось удалить устаревшую версию $PROTECTION_COMMAND_PATH."
         rm -f "$temp_path"
         return 0
     fi
-    if ! ${USE_SUDO:+$USE_SUDO }mv -f "$install_path" "$PROTECTION_COMMAND_PATH"; then
-        if [[ "$legacy_version" == "yes" && -f "${PROTECTION_COMMAND_PATH}.bak" ]]; then
-            ${USE_SUDO:+$USE_SUDO }cp -p "${PROTECTION_COMMAND_PATH}.bak" "$PROTECTION_COMMAND_PATH"
+    if ! ${USE_SUDO:+$USE_SUDO }mv -f -- "$install_path" "$PROTECTION_COMMAND_PATH"; then
+        if [[ -f "${PROTECTION_COMMAND_PATH}.bak" ]]; then
+            ${USE_SUDO:+$USE_SUDO }cp -p -- "${PROTECTION_COMMAND_PATH}.bak" "$PROTECTION_COMMAND_PATH"
         fi
-        ${USE_SUDO:+$USE_SUDO }rm -f "$install_path"
+        ${USE_SUDO:+$USE_SUDO }rm -f -- "$install_path"
         red "Не удалось установить обновление protection. Продолжаем работу текущей версией."
         rm -f "$temp_path"
         return 0

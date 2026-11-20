@@ -20,9 +20,11 @@ set -o pipefail
 # Переменные
 username=""
 USE_SUDO=""
-PROTECTION_VERSION="1.7.18"
+PROTECTION_VERSION="1.7.19"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 PROTECTION_UPDATE_URL="https://raw.githubusercontent.com/svu2009-prog/Protection/main/protection.sh"
+# Аргументы исходного запуска сохраняются для корректного перезапуска после обновления.
+PROTECTION_START_ARGS=("$@")
 
 # SHA-256 хэши релизов добавляются вручную до публикации версии.
 # Не загружайте checksum из того же источника, что и сам скрипт.
@@ -38,6 +40,7 @@ declare -A PROTECTION_UPDATE_SHA256=(
     ["1.7.16"]="6f80798f454891a81fece20e7c1f5ce5f58e10d7b89caf0658e4f36eb3235a7b"
     ["1.7.17"]="4285591e2a6a95eb3702a12cec56b4c1d3503676d2d11899de76858b81a832f2"
     ["1.7.18"]="a309181196f57e5074d4192c2f777f2884d11a35d4c2ce72b440f78ed5e68a83"
+    ["1.7.19"]="99f306f884215255a6a384980a5355ddf81254264286c0da231f09453de5b808"
 )
 
 # ============================================================
@@ -222,121 +225,133 @@ ensure_global_command() {
 }
 
 check_for_updates() {
-    local temp_path remote_version version_status command_dir install_path
-    local installed_version legacy_version="no"
+    local temp_path remote_version version_status command_dir install_path remote_sha256
+    local backup_path="${PROTECTION_COMMAND_PATH}.bak" installed_version=""
+    local expected_sha256=""
 
     cyan "Проверяем наличие обновлений protection..."
+    if ! command -v sha256sum >/dev/null 2>&1; then
+        yellow "sha256sum не найден. Проверка обновления пропущена."
+        return 0
+    fi
 
-    if command -v curl &>/dev/null; then
-        temp_path="$(mktemp "${TMPDIR:-/tmp}/protection-update.XXXXXX" 2>/dev/null)" || return 0
-        if ! curl -fsSL --connect-timeout 3 --max-time 8 -o "$temp_path" "$PROTECTION_UPDATE_URL" 2>/dev/null; then
-            rm -f "$temp_path"
+    temp_path="$(mktemp "${TMPDIR:-/tmp}/protection-update.XXXXXX" 2>/dev/null)" || {
+        yellow "Не удалось создать временный файл для обновления."
+        return 0
+    }
+    if command -v curl >/dev/null 2>&1; then
+        if ! curl --fail --location --silent --show-error --connect-timeout 5 --max-time 30 \
+            --retry 2 --retry-delay 1 -o "$temp_path" "$PROTECTION_UPDATE_URL" 2>/dev/null; then
+            rm -f -- "$temp_path"
             yellow "Не удалось проверить обновления. Продолжаем работу текущей версией."
             return 0
         fi
-    elif command -v wget &>/dev/null; then
-        temp_path="$(mktemp "${TMPDIR:-/tmp}/protection-update.XXXXXX" 2>/dev/null)" || return 0
-        if ! wget -q --timeout=5 --tries=1 -O "$temp_path" "$PROTECTION_UPDATE_URL" 2>/dev/null; then
-            rm -f "$temp_path"
+    elif command -v wget >/dev/null 2>&1; then
+        if ! wget -q --timeout=10 --tries=2 -O "$temp_path" "$PROTECTION_UPDATE_URL" 2>/dev/null; then
+            rm -f -- "$temp_path"
             yellow "Не удалось проверить обновления. Продолжаем работу текущей версией."
             return 0
         fi
     else
+        rm -f -- "$temp_path"
         yellow "Не найден curl или wget. Проверка обновлений пропущена."
         return 0
     fi
 
-    remote_version="$(get_script_version "$temp_path")"
+    if [[ ! -s "$temp_path" ]] || ! remote_version="$(get_script_version "$temp_path")" ||
+        [[ ! "$remote_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        rm -f -- "$temp_path"
+        red "Обновление отклонено: файл пустой или содержит некорректную версию."
+        return 0
+    fi
+    if ! bash -n "$temp_path"; then
+        rm -f -- "$temp_path"
+        red "Обновление отклонено: синтаксическая ошибка Bash."
+        return 0
+    fi
+
     version_status="$(compare_versions "$PROTECTION_VERSION" "$remote_version")"
     if [[ "$version_status" != "newer" ]]; then
-        rm -f "$temp_path"
+        rm -f -- "$temp_path"
         green "Установлена актуальная версия protection: $PROTECTION_VERSION"
         return 0
     fi
 
-    if ! command -v sha256sum &>/dev/null; then
-        rm -f "$temp_path"
-        red "Обновление $remote_version отклонено: sha256sum не найден."
+    expected_sha256="${PROTECTION_UPDATE_SHA256[$remote_version]:-}"
+    if [[ ! "$expected_sha256" =~ ^[a-fA-F0-9]{64}$ ]]; then
+        rm -f -- "$temp_path"
+        red "Обновление $remote_version отклонено: для этой версии нет доверенного SHA-256 в списке релизов."
         return 0
     fi
-
-    local remote_sha256
     remote_sha256="$(get_script_sha256 "$temp_path")"
-    if [[ -n "${PROTECTION_UPDATE_SHA256[$remote_version]:-}" &&
-        "$remote_sha256" != "${PROTECTION_UPDATE_SHA256[$remote_version]}" ]]; then
-        rm -f "$temp_path"
+    if [[ "$remote_sha256" != "$expected_sha256" ]]; then
+        rm -f -- "$temp_path"
         red "Обновление $remote_version отклонено: SHA-256 не совпал."
         return 0
     fi
 
-    if [[ -z "${PROTECTION_UPDATE_SHA256[$remote_version]:-}" ]]; then
-        yellow "Для версии $remote_version нет заранее сохраненного SHA-256."
-        yellow "Файл получен по HTTPS и будет установлен только после вашего подтверждения."
-    fi
-
-    yellow "Доступно обновление protection: $PROTECTION_VERSION -> $remote_version"
+    yellow "Доступно проверенное обновление protection: $PROTECTION_VERSION -> $remote_version"
     if [[ "$(prompt_yes_no "Обновить protection сейчас?" "no")" != "yes" ]]; then
-        rm -f "$temp_path"
+        rm -f -- "$temp_path"
         return 0
     fi
 
     command_dir="$(dirname "$PROTECTION_COMMAND_PATH")"
     if ! ${USE_SUDO:+$USE_SUDO }mkdir -p "$command_dir"; then
-        red "Не удалось создать каталог $command_dir для обновления protection."
-        rm -f "$temp_path"
+        rm -f -- "$temp_path"
+        red "Не удалось создать каталог $command_dir."
         return 0
     fi
     if ! install_path=$(${USE_SUDO:+$USE_SUDO }mktemp "$command_dir/.protection-update.XXXXXX"); then
-        red "Не удалось создать временный файл для обновления protection."
-        rm -f "$temp_path"
+        rm -f -- "$temp_path"
+        red "Не удалось создать временный файл установки."
         return 0
     fi
-    if ! ${USE_SUDO:+$USE_SUDO }install -m 0755 "$temp_path" "$install_path"; then
+    if ! ${USE_SUDO:+$USE_SUDO }install -m 0755 "$temp_path" "$install_path" ||
+        ! ${USE_SUDO:+$USE_SUDO }bash -n "$install_path" ||
+        [[ "$(${USE_SUDO:+$USE_SUDO }grep -m1 '^PROTECTION_VERSION=' "$install_path" 2>/dev/null | cut -d'"' -f2)" != "$remote_version" ]]; then
         ${USE_SUDO:+$USE_SUDO }rm -f -- "$install_path"
-        red "Не удалось скопировать обновление protection во временный файл."
-        rm -f "$temp_path"
-        return 0
-    fi
-    if ! get_script_version "$install_path" >/dev/null; then
-        ${USE_SUDO:+$USE_SUDO }rm -f -- "$install_path"
-        red "Скачанный файл обновления protection повреждён или не является скриптом."
-        rm -f "$temp_path"
-        return 0
-    fi
-    if [[ -f "$PROTECTION_COMMAND_PATH" ]] &&
-        ! ${USE_SUDO:+$USE_SUDO }cp -p -- "$PROTECTION_COMMAND_PATH" "${PROTECTION_COMMAND_PATH}.bak"; then
-        ${USE_SUDO:+$USE_SUDO }rm -f -- "$install_path"
-        red "Не удалось создать резервную копию $PROTECTION_COMMAND_PATH."
-        rm -f "$temp_path"
+        rm -f -- "$temp_path"
+        red "Обновление не прошло проверку после копирования."
         return 0
     fi
 
-    installed_version="$(get_script_version "$PROTECTION_COMMAND_PATH")"
-    if is_legacy_protection_version "$installed_version"; then
-        legacy_version="yes"
-    fi
-    if [[ "$legacy_version" == "yes" ]] &&
-        ! ${USE_SUDO:+$USE_SUDO }rm -f "$PROTECTION_COMMAND_PATH"; then
-        ${USE_SUDO:+$USE_SUDO }rm -f -- "$install_path"
-        red "Не удалось удалить устаревшую версию $PROTECTION_COMMAND_PATH."
-        rm -f "$temp_path"
-        return 0
-    fi
-    if ! ${USE_SUDO:+$USE_SUDO }mv -f -- "$install_path" "$PROTECTION_COMMAND_PATH"; then
-        if [[ -f "${PROTECTION_COMMAND_PATH}.bak" ]]; then
-            ${USE_SUDO:+$USE_SUDO }cp -p -- "${PROTECTION_COMMAND_PATH}.bak" "$PROTECTION_COMMAND_PATH"
+    if [[ -e "$PROTECTION_COMMAND_PATH" ]]; then
+        if ! ${USE_SUDO:+$USE_SUDO }cp -p -- "$PROTECTION_COMMAND_PATH" "$backup_path"; then
+            ${USE_SUDO:+$USE_SUDO }rm -f -- "$install_path"
+            rm -f -- "$temp_path"
+            red "Не удалось создать резервную копию текущей версии."
+            return 0
         fi
+        installed_version="$(get_script_version "$PROTECTION_COMMAND_PATH" 2>/dev/null || true)"
+    fi
+
+    if ! ${USE_SUDO:+$USE_SUDO }mv -f -- "$install_path" "$PROTECTION_COMMAND_PATH"; then
         ${USE_SUDO:+$USE_SUDO }rm -f -- "$install_path"
-        red "Не удалось установить обновление protection. Продолжаем работу текущей версией."
-        rm -f "$temp_path"
+        rm -f -- "$temp_path"
+        red "Не удалось атомарно установить обновление."
+        return 0
+    fi
+    rm -f -- "$temp_path"
+
+    # Проверяем установленный файл до передачи управления новой версии.
+    if ! ${USE_SUDO:+$USE_SUDO }bash -n "$PROTECTION_COMMAND_PATH" ||
+        [[ "$(get_script_version "$PROTECTION_COMMAND_PATH" 2>/dev/null || true)" != "$remote_version" ]]; then
+        if [[ -f "$backup_path" ]]; then
+            ${USE_SUDO:+$USE_SUDO }mv -f -- "$backup_path" "$PROTECTION_COMMAND_PATH"
+        fi
+        red "Установленная версия не прошла контроль. Выполнен откат."
         return 0
     fi
 
-    rm -f "$temp_path"
-    green "Protection обновлён до версии $remote_version. Перезапускаем скрипт."
-    if ! exec "$PROTECTION_COMMAND_PATH" "$@"; then
-        red "Не удалось перезапустить обновлённый protection. Продолжаем текущую версию."
+    purple "Protection обновлён до версии $remote_version. Перезапускаем скрипт."
+    exec "$PROTECTION_COMMAND_PATH" "${PROTECTION_START_ARGS[@]}"
+    local exec_status=$?
+    if [[ -f "$backup_path" ]]; then
+        ${USE_SUDO:+$USE_SUDO }mv -f -- "$backup_path" "$PROTECTION_COMMAND_PATH"
     fi
+    red "Не удалось запустить обновлённую версию (код $exec_status). Предыдущая версия восстановлена."
+    return 0
 }
 
 # ============================================================
@@ -653,13 +668,20 @@ validate_port() {
 
 # Проверка порта SSH (диапазон 1024-65535)
 # Получение текущего порта SSH из конфигурации
+get_ssh_ports() {
+    local ports=""
+    if command -v sshd >/dev/null 2>&1; then
+        ports="$(sshd -T 2>/dev/null | awk '$1 == "port" {print $2}' | sort -nu)"
+    fi
+    if [[ -z "$ports" ]]; then
+        ports="$(awk 'tolower($1)=="port" && $1 !~ /^#/ {print $2}' /etc/ssh/sshd_config 2>/dev/null | sort -nu)"
+    fi
+    if [[ -z "$ports" ]]; then ports="22"; fi
+    printf '%s\n' "$ports"
+}
+
 get_ssh_port() {
-    local port
-    # Фактическое значение (учитывает Include sshd_config.d), fallback на основной конфиг
-    port=$(sshd -T 2>/dev/null | awk '/^port[[:space:]]/ {print $2; exit}')
-    [[ -z "$port" ]] && port=$(grep -i '^Port' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | xargs)
-    [[ -z "$port" ]] && port=22
-    echo "$port"
+    get_ssh_ports | head -n1
 }
 
 ufw_allow_port() {
@@ -1499,70 +1521,83 @@ users_menu() {
 
 # Проверка sshd_config и безопасный рестарт sshd.
 # Откат изменяемого drop-in выполняет вызывающая функция по своей свежей копии.
-validate_and_restart_sshd() {
-    if ! ${USE_SUDO:+$USE_SUDO }sshd -t 2>/dev/null; then
-        red "Ошибка: конфигурация sshd невалидна (sshd -t завершился с ошибкой)."
-        return 1
-    fi
-
-    # Перезапуск sshd: сначала ssh (Ubuntu/Debian), затем sshd (fallback)
-    if ${USE_SUDO:+$USE_SUDO }systemctl restart ssh 2>/dev/null; then
-        return 0
-    fi
-    if ${USE_SUDO:+$USE_SUDO }systemctl restart sshd 2>/dev/null; then
-        return 0
-    fi
-
-    red "Ошибка: не удалось перезапустить службу sshd (ssh/sshd)."
-    red "Внимание: текущая SSH-сессия может быть затронута. Проверьте статус службы вручную."
+detect_ssh_mode() {
+    local socket_active="no" service_active="no"
+    for unit in ssh.socket sshd.socket; do
+        if systemctl is-active --quiet "$unit" 2>/dev/null; then
+            socket_active="yes"
+            printf 'socket:%s\n' "$unit"
+            return 0
+        fi
+    done
+    for unit in ssh.service sshd.service; do
+        if systemctl is-active --quiet "$unit" 2>/dev/null; then
+            service_active="yes"
+            printf 'service:%s\n' "$unit"
+            return 0
+        fi
+    done
+    # Сокет может быть включён, но временно неактивен. Не переключаем его молча на service.
+    for unit in ssh.socket sshd.socket; do
+        if systemctl is-enabled --quiet "$unit" 2>/dev/null; then
+            printf 'enabled-socket:%s\n' "$unit"
+            return 0
+        fi
+    done
     return 1
 }
 
-# Удалить все строки PermitRootLogin из основного конфига (включая закомментированные).
-# Это гарантирует, что значение из drop-in (/etc/ssh/sshd_config.d/00-protection.conf) будет применено.
-cleanup_permitrootlogin_duplicates() {
-    local sshd_config="/etc/ssh/sshd_config"
-    local backup=""
-    
-    # Проверяем, есть ли строки с PermitRootLogin
-    if ! grep -qiE '^\s*#?\s*PermitRootLogin' "$sshd_config" 2>/dev/null; then
-        return 0  # Нет дубликатов, ничего не делаем
-    fi
-    
-    # Создаём резервную копию перед изменением
-    backup=$(mktemp "${sshd_config}.cleanup-XXXXXX") || return 1
-    cp -p -- "$sshd_config" "$backup" || { rm -f -- "$backup"; return 1; }
-    
-    # Удаляем ВСЕ строки (закомментированные и нет) содержащие PermitRootLogin
-    if ! sed -i -E '/^\s*#?\s*PermitRootLogin/d' "$sshd_config"; then
-        cp -p -- "$backup" "$sshd_config"
-        rm -f -- "$backup"
+validate_and_restart_sshd() {
+    local mode unit
+    if ! sshd -t 2>/dev/null; then
+        red "Ошибка: конфигурация sshd невалидна (sshd -t)."
         return 1
     fi
-    
-    # Проверяем синтаксис конфига
-    if ! ${USE_SUDO:+$USE_SUDO }sshd -t 2>/dev/null; then
-        cp -p -- "$backup" "$sshd_config"
-        rm -f -- "$backup"
-        return 1
-    fi
-    
-    rm -f -- "$backup"
-    return 0
-}
-# Убедиться, что /etc/ssh/sshd_config содержит Include для sshd_config.d/*.conf
-_ensure_sshd_include() {
-    local sshd_config="/etc/ssh/sshd_config"
-    local include_line="Include /etc/ssh/sshd_config.d/*.conf"
-    cleanup_permitrootlogin_duplicates || return 1
-    if ! grep -qE '^\s*Include\s+/etc/ssh/sshd_config\.d/\*\.conf' "$sshd_config" 2>/dev/null; then
-        cp "$sshd_config" "${sshd_config}.bak" || { red "Не удалось создать резервную копию $sshd_config."; return 1; }
-        printf '%s\n' "$include_line" | cat - "$sshd_config" > "${sshd_config}.tmp" && mv "${sshd_config}.tmp" "$sshd_config" || {
-            red "Не удалось добавить Include в $sshd_config."
+    mode="$(detect_ssh_mode 2>/dev/null || true)"
+    case "$mode" in
+        socket:*)
+            unit="${mode#socket:}"
+            systemctl daemon-reload && systemctl restart "$unit"
+            ;;
+        enabled-socket:*)
+            unit="${mode#enabled-socket:}"
+            red "$unit включён, но не активен. Изменение отменено во избежание переключения режима запуска SSH."
             return 1
-        }
-        yellow "Добавлен Include /etc/ssh/sshd_config.d/*.conf в $sshd_config"
+            ;;
+        service:*)
+            unit="${mode#service:}"
+            systemctl restart "$unit"
+            ;;
+        *)
+            red "Не удалось определить активный SSH unit (ssh/sshd service/socket)."
+            return 1
+            ;;
+    esac
+}
+
+# Убедиться, что sshd_config подключает drop-in каталог в самом начале.
+# Не меняет PermitRootLogin и другие пользовательские директивы.
+_ensure_sshd_include() {
+    local cfg="/etc/ssh/sshd_config" tmp backup
+    local include_line='Include /etc/ssh/sshd_config.d/*.conf'
+    [[ -f "$cfg" ]] || { red "Не найден $cfg."; return 1; }
+    [[ "$(head -n1 "$cfg" 2>/dev/null)" == "$include_line" ]] && return 0
+    backup="${cfg}.protection.bak"
+    cp -p -- "$cfg" "$backup" || { red "Не удалось создать резервную копию $cfg."; return 1; }
+    tmp="$(mktemp "${cfg}.XXXXXX")" || return 1
+    {
+        printf '%s\n' "$include_line"
+        awk '!($1 == "Include" && $2 == "/etc/ssh/sshd_config.d/*.conf") {print}' "$cfg"
+    } > "$tmp" && chmod --reference="$cfg" "$tmp" && chown --reference="$cfg" "$tmp" || {
+        rm -f -- "$tmp"; red "Не удалось подготовить $cfg."; return 1;
+    }
+    if ! mv -f -- "$tmp" "$cfg" || ! sshd -t 2>/dev/null; then
+        cp -p -- "$backup" "$cfg"
+        rm -f -- "$tmp"
+        red "Добавление Include нарушило конфигурацию. Исходный файл восстановлен."
+        return 1
     fi
+    yellow "Добавлен Include в начало $cfg. Резервная копия: $backup"
 }
 
 # Восстановить именно предыдущее состояние drop-in SSH, не используя старый .bak.
@@ -1947,180 +1982,170 @@ disable_root_ssh() {
 
 # Изменение порта SSH
 change_port_ssh() {
-    local NEW_SSH_PORT sshd_dropin backup existed ufw_rule_added CURRENT_SSH_PORT
-    local effective_ssh_ports ssh_socket_active socket_dropin socket_backup socket_existed port_ready
-    CURRENT_SSH_PORT=$(get_ssh_port)
-    
-    if [[ "$(prompt_yes_no "Порт SSH = $CURRENT_SSH_PORT, хотите изменить его?" "no")" == "no" ]]; then
-        return
+    local new_port current_port mode unit sshd_cfg dropin socket_dropin
+    local cfg_backup dropin_backup socket_backup existed_dropin="no" existed_socket="no"
+    local ufw_added="no" tmp effective_ports listener_ok="no" old_ports
+
+    current_port="$(get_ssh_port)"
+    if [[ "$(prompt_yes_no "Порты SSH = $(get_ssh_ports | paste -sd, -). Изменить порт?" "no")" != "yes" ]]; then
+        return 0
     fi
 
     while true; do
-        read -r -p 'Введите новый порт SSH (от 1024 до 65535): ' NEW_SSH_PORT
-        
-        if validate_port "$NEW_SSH_PORT" 1024 65535; then
-            if port_in_use "$NEW_SSH_PORT"; then
-                red "Порт $NEW_SSH_PORT уже занят. Выберите другой."
-                continue
-            fi
-            ssh_socket_active="no"
-            socket_dropin="/etc/systemd/system/ssh.socket.d/zz-protection-port.conf"
-            socket_backup=""
-            socket_existed="no"
-            if ${USE_SUDO:+$USE_SUDO }systemctl is-active --quiet ssh.socket 2>/dev/null; then
-                ssh_socket_active="yes"
-                if [[ -f "$socket_dropin" ]]; then
-                    socket_existed="yes"
-                    socket_backup=$(mktemp "${socket_dropin}.XXXXXX") || {
-                        red "Не удалось создать резервную копию systemd socket override."
-                        return 1
-                    }
-                    if ! cp -p -- "$socket_dropin" "$socket_backup"; then
-                        rm -f -- "$socket_backup"
-                        red "Не удалось создать резервную копию systemd socket override."
-                        return 1
-                    fi
-                fi
-            fi
-            sshd_dropin="/etc/ssh/sshd_config.d/00-protection.conf"
-            mkdir -p "$(dirname "$sshd_dropin")" || {
-                [[ -n "$socket_backup" ]] && rm -f -- "$socket_backup"
-                red "Не удалось создать каталог drop-in SSH."
-                return 1
-            }
-            if ! _ensure_sshd_include; then
-                [[ -n "$socket_backup" ]] && rm -f -- "$socket_backup"
-                return 1
-            fi
-            backup=""
-            existed="no"
-            ufw_rule_added="no"
-            if [[ -f "$sshd_dropin" ]]; then
-                existed="yes"
-                backup=$(mktemp "$(dirname "$sshd_dropin")/.00-protection.XXXXXX") || {
-                    [[ -n "$socket_backup" ]] && rm -f -- "$socket_backup"
-                    red "Не удалось создать резервную копию SSH drop-in."
-                    return 1
-                }
-                if ! cp -p -- "$sshd_dropin" "$backup"; then
-                    rm -f -- "$backup"
-                    [[ -n "$socket_backup" ]] && rm -f -- "$socket_backup"
-                    red "Не удалось создать резервную копию SSH drop-in."
-                    return 1
-                fi
-            fi
-
-            # Открываем новый порт в UFW до рестарта sshd (если UFW активен)
-            if ${USE_SUDO:+$USE_SUDO }ufw status 2>/dev/null | grep -q 'Status: active'; then
-                if ! ufw_rule_exists "$NEW_SSH_PORT/tcp"; then
-                    ufw_rule_added="yes"
-                fi
-                if ! ufw_allow_port "$NEW_SSH_PORT" tcp; then
-                    [[ -n "$backup" ]] && rm -f -- "$backup"
-                    [[ -n "$socket_backup" ]] && rm -f -- "$socket_backup"
-                    red "Не удалось открыть порт $NEW_SSH_PORT/tcp в UFW. SSH-конфигурация не изменена."
-                    return 1
-                fi
-            fi
-
-            if [[ -f "$sshd_dropin" ]]; then
-                if ! sed -i -E "/^[[:space:]]*Port[[:space:]]/d; /^[[:space:]]*AddressFamily[[:space:]]/d; 1iAddressFamily inet\nPort $NEW_SSH_PORT" "$sshd_dropin"; then
-                    restore_sshd_dropin "$sshd_dropin" "$backup" "$existed" || red "Требуется ручная проверка конфигурации SSH после неудачного отката."
-                    [[ "$ufw_rule_added" == "yes" ]] && echo "y" | ${USE_SUDO:+$USE_SUDO }ufw delete allow "$NEW_SSH_PORT/tcp" >/dev/null 2>&1
-                    [[ -n "$backup" ]] && rm -f -- "$backup"
-                    [[ -n "$socket_backup" ]] && rm -f -- "$socket_backup"
-                    red "Не удалось изменить порт SSH."
-                    return 1
-                fi
-            elif ! printf 'AddressFamily inet\nPort %s\n' "$NEW_SSH_PORT" > "$sshd_dropin"; then
-                rm -f -- "$sshd_dropin"
-                [[ "$ufw_rule_added" == "yes" ]] && echo "y" | ${USE_SUDO:+$USE_SUDO }ufw delete allow "$NEW_SSH_PORT/tcp" >/dev/null 2>&1
-                [[ -n "$backup" ]] && rm -f -- "$backup"
-                [[ -n "$socket_backup" ]] && rm -f -- "$socket_backup"
-                red "Не удалось изменить порт SSH."
-                return 1
-            fi
-
-            if [[ "$ssh_socket_active" == "yes" ]] && {
-                ! mkdir -p "$(dirname "$socket_dropin")" ||
-                ! printf '[Socket]\nListenStream=\nListenStream=0.0.0.0:%s\n' "$NEW_SSH_PORT" > "$socket_dropin" ||
-                ! ${USE_SUDO:+$USE_SUDO }systemctl daemon-reload ||
-                ! ${USE_SUDO:+$USE_SUDO }systemctl restart ssh.socket;
-            }; then
-                if [[ "$socket_existed" == "yes" ]]; then
-                    cp -p -- "$socket_backup" "$socket_dropin"
-                else
-                    rm -f -- "$socket_dropin"
-                fi
-                ${USE_SUDO:+$USE_SUDO }systemctl daemon-reload >/dev/null 2>&1
-                ${USE_SUDO:+$USE_SUDO }systemctl restart ssh.socket >/dev/null 2>&1
-                restore_sshd_dropin "$sshd_dropin" "$backup" "$existed" >/dev/null 2>&1
-                [[ -n "$backup" ]] && rm -f -- "$backup"
-                [[ -n "$socket_backup" ]] && rm -f -- "$socket_backup"
-                red "Не удалось применить IPv4-порт $NEW_SSH_PORT к systemd ssh.socket."
-                return 1
-            fi
-
-            # При socket-активации ssh.socket уже запустил ssh.service. Повторный
-            # restart ssh.service закрывает переданный systemd socket и ломает listener.
-            if [[ "$ssh_socket_active" == "yes" ]]; then
-                sshd -t 2>/dev/null
-            else
-                validate_and_restart_sshd
-            fi
-            if [[ $? -ne 0 ]]; then
-                red "Не удалось применить новый порт SSH. Проверьте конфигурацию вручную."
-                restore_sshd_dropin "$sshd_dropin" "$backup" "$existed" || red "Требуется ручная проверка конфигурации SSH после неудачного отката."
-                if [[ "$ssh_socket_active" == "yes" ]]; then
-                    if [[ "$socket_existed" == "yes" ]]; then cp -p -- "$socket_backup" "$socket_dropin"; else rm -f -- "$socket_dropin"; fi
-                    ${USE_SUDO:+$USE_SUDO }systemctl daemon-reload >/dev/null 2>&1
-                    ${USE_SUDO:+$USE_SUDO }systemctl restart ssh.socket >/dev/null 2>&1
-                fi
-                [[ "$ufw_rule_added" == "yes" ]] && echo "y" | ${USE_SUDO:+$USE_SUDO }ufw delete allow "$NEW_SSH_PORT/tcp" >/dev/null 2>&1
-                [[ -n "$backup" ]] && rm -f -- "$backup"
-                [[ -n "$socket_backup" ]] && rm -f -- "$socket_backup"
-                return 1
-            fi
-            port_ready="no"
-            for _ in {1..10}; do
-                if [[ "$ssh_socket_active" == "yes" ]]; then
-                    port_in_use "$NEW_SSH_PORT"
-                else
-                    effective_ssh_ports=$(sshd -T 2>/dev/null | awk '$1 == "port" {print $2}')
-                    printf '%s\n' "$effective_ssh_ports" | grep -Fxq "$NEW_SSH_PORT" && port_in_use "$NEW_SSH_PORT"
-                fi
-                if [[ $? -eq 0 ]]; then
-                    port_ready="yes"
-                    break
-                fi
-                sleep 0.2
-            done
-            if [[ "$port_ready" != "yes" ]]; then
-                red "Эффективный порт SSH не совпал с ожидаемым: $NEW_SSH_PORT."
-                restore_sshd_dropin "$sshd_dropin" "$backup" "$existed" || red "Требуется ручная проверка конфигурации SSH после неудачного отката."
-                if [[ "$ssh_socket_active" == "yes" ]]; then
-                    if [[ "$socket_existed" == "yes" ]]; then cp -p -- "$socket_backup" "$socket_dropin"; else rm -f -- "$socket_dropin"; fi
-                    ${USE_SUDO:+$USE_SUDO }systemctl daemon-reload >/dev/null 2>&1
-                    ${USE_SUDO:+$USE_SUDO }systemctl restart ssh.socket >/dev/null 2>&1
-                fi
-                [[ "$ufw_rule_added" == "yes" ]] && echo "y" | ${USE_SUDO:+$USE_SUDO }ufw delete allow "$NEW_SSH_PORT/tcp" >/dev/null 2>&1
-                [[ -n "$backup" ]] && rm -f -- "$backup"
-                [[ -n "$socket_backup" ]] && rm -f -- "$socket_backup"
-                return 1
-            fi
-            [[ -n "$backup" ]] && rm -f -- "$backup"
-            [[ -n "$socket_backup" ]] && rm -f -- "$socket_backup"
-
-            purple "Порт SSH изменен на $NEW_SSH_PORT."
-            if [[ -f /etc/fail2ban/jail.local ]] && ! grep -qE "^port = $NEW_SSH_PORT$" /etc/fail2ban/jail.local; then
-                yellow "Внимание: jail Fail2ban (jail.local) настроен не на порт $NEW_SSH_PORT — обновите конфигурацию Fail2ban (пункт 8 меню)."
-            fi
-            CURRENT_SSH_PORT=$NEW_SSH_PORT
-            break
-        else
-            red "Недопустимый порт. Порт должен быть в диапазоне от 1024 до 65535."
-        fi
+        read -r -p 'Введите новый порт SSH (от 1024 до 65535): ' new_port
+        if validate_port "$new_port" 1024 65535; then break; fi
+        red "Недопустимый порт. Допустимый диапазон: 1024–65535."
     done
+    if port_in_use "$new_port"; then
+        red "Порт $new_port уже занят. Изменение отменено."
+        return 1
+    fi
+
+    mode="$(detect_ssh_mode 2>/dev/null)" || {
+        red "Не удалось определить способ запуска SSH. Изменение отменено."
+        return 1
+    }
+    case "$mode" in
+        socket:*) unit="${mode#socket:}" ;;
+        service:*) unit="${mode#service:}" ;;
+        enabled-socket:*)
+            red "$mode обнаружен, но не активен. Сначала разберитесь с состоянием socket unit."
+            return 1
+            ;;
+        *) red "Неизвестный режим SSH: $mode"; return 1 ;;
+    esac
+
+    sshd_cfg="/etc/ssh/sshd_config"
+    dropin="/etc/ssh/sshd_config.d/00-protection.conf"
+    socket_dropin="/etc/systemd/system/${unit%.socket}.socket.d/zz-protection-port.conf"
+    [[ "$unit" == *.socket ]] && socket_dropin="/etc/systemd/system/${unit}.d/zz-protection-port.conf"
+
+    # Fail closed при других активных Port в drop-in файлах: не удаляем чужие настройки.
+    if [[ -d /etc/ssh/sshd_config.d ]]; then
+        local f
+        for f in /etc/ssh/sshd_config.d/*.conf; do
+            [[ -f "$f" && "$f" != "$dropin" ]] || continue
+            if grep -Eq '^[[:space:]]*Port[[:space:]]+[0-9]+' "$f"; then
+                red "Найдена сторонняя директива Port в $f. Сначала устраните конфликт; файл не изменён."
+                return 1
+            fi
+        done
+    fi
+
+    cfg_backup="${sshd_cfg}.protection-port.bak"
+    dropin_backup="${dropin}.protection-port.bak"
+    socket_backup="${socket_dropin}.protection-port.bak"
+    cp -p -- "$sshd_cfg" "$cfg_backup" || { red "Не удалось сохранить $sshd_cfg."; return 1; }
+    if [[ -e "$dropin" ]]; then
+        existed_dropin="yes"
+        cp -p -- "$dropin" "$dropin_backup" || { red "Не удалось сохранить $dropin."; return 1; }
+    fi
+    if [[ "$unit" == *.socket && -e "$socket_dropin" ]]; then
+        existed_socket="yes"
+        cp -p -- "$socket_dropin" "$socket_backup" || { red "Не удалось сохранить $socket_dropin."; return 1; }
+    fi
+
+    # Разрешаем новый порт до переключения, старый порт пока не закрываем.
+    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q 'Status: active'; then
+        if ! ufw_rule_exists "$new_port/tcp"; then ufw_added="yes"; fi
+        if ! ufw_allow_port "$new_port" tcp; then
+            red "Не удалось открыть $new_port/tcp в UFW."
+            return 1
+        fi
+    fi
+
+    if ! _ensure_sshd_include; then
+        [[ "$ufw_added" == yes ]] && echo y | ufw delete allow "$new_port/tcp" >/dev/null 2>&1
+        return 1
+    fi
+    if ! mkdir -p "$(dirname "$dropin")"; then
+        cp -p -- "$cfg_backup" "$sshd_cfg"
+        [[ "$ufw_added" == yes ]] && echo y | ufw delete allow "$new_port/tcp" >/dev/null 2>&1
+        return 1
+    fi
+
+    # Port 22 в основном файле удаляем только как активную директиву;
+    # закомментированные строки и остальные параметры сохраняются.
+    tmp="$(mktemp "${sshd_cfg}.XXXXXX")" || { cp -p -- "$cfg_backup" "$sshd_cfg"; return 1; }
+    if ! awk '!($1 == "Port" || $1 == "port") {print}' "$sshd_cfg" > "$tmp" ||
+        ! chmod --reference="$sshd_cfg" "$tmp" || ! chown --reference="$sshd_cfg" "$tmp" ||
+        ! mv -f -- "$tmp" "$sshd_cfg"; then
+        rm -f -- "$tmp"
+        cp -p -- "$cfg_backup" "$sshd_cfg"
+        [[ "$ufw_added" == yes ]] && echo y | ufw delete allow "$new_port/tcp" >/dev/null 2>&1
+        red "Не удалось нормализовать Port в основном конфиге."
+        return 1
+    fi
+
+    if ! printf 'Port %s\n' "$new_port" > "$dropin"; then
+        cp -p -- "$cfg_backup" "$sshd_cfg"
+        if [[ "$existed_dropin" == yes ]]; then cp -p -- "$dropin_backup" "$dropin"; else rm -f -- "$dropin"; fi
+        [[ "$ufw_added" == yes ]] && echo y | ufw delete allow "$new_port/tcp" >/dev/null 2>&1
+        red "Не удалось записать $dropin. Выполнен откат файлов."
+        return 1
+    fi
+
+    if [[ "$unit" == *.socket ]]; then
+        if ! sshd -t 2>/dev/null; then
+            red "Конфигурация sshd не прошла проверку. Изменение отменяется."
+            goto_ssh_port_rollback=1
+        fi
+        if [[ "${goto_ssh_port_rollback:-0}" != 1 ]] && ! mkdir -p "$(dirname "$socket_dropin")"; then
+            cp -p -- "$cfg_backup" "$sshd_cfg"
+            if [[ "$existed_dropin" == yes ]]; then cp -p -- "$dropin_backup" "$dropin"; else rm -f -- "$dropin"; fi
+            [[ "$ufw_added" == yes ]] && echo y | ufw delete allow "$new_port/tcp" >/dev/null 2>&1
+            return 1
+        fi
+        # Пустой ListenStream сбрасывает все ListenStream из unit и предыдущих drop-in.
+        if ! printf '[Socket]\nListenStream=\nListenStream=%s\n' "$new_port" > "$socket_dropin" ||
+            ! systemctl daemon-reload || ! systemctl restart "$unit"; then
+            red "Не удалось применить новый порт через $unit. Выполняется откат."
+            goto_ssh_port_rollback=1
+        fi
+    else
+        if ! sshd -t 2>/dev/null || ! systemctl restart "$unit"; then
+            red "Не удалось проверить или перезапустить $unit. Выполняется откат."
+            goto_ssh_port_rollback=1
+        fi
+    fi
+
+    if [[ "${goto_ssh_port_rollback:-0}" != 1 ]]; then
+        for _ in {1..20}; do
+            effective_ports="$(sshd -T 2>/dev/null | awk '$1=="port" {print $2}' | sort -nu)"
+            if [[ "$unit" == *.socket ]]; then
+                listener_ok="no"
+                if command -v ss >/dev/null 2>&1 && ss -H -ltn 2>/dev/null | awk -v p=":$new_port" '$4 ~ (p "$") {found=1} END {exit !found}'; then listener_ok="yes"; fi
+            elif printf '%s\n' "$effective_ports" | grep -Fxq "$new_port" && port_in_use "$new_port"; then
+                listener_ok="yes"
+            fi
+            [[ "$listener_ok" == yes ]] && break
+            sleep 0.25
+        done
+        [[ "$listener_ok" != yes ]] && goto_ssh_port_rollback=1
+    fi
+
+    if [[ "${goto_ssh_port_rollback:-0}" == 1 ]]; then
+        cp -p -- "$cfg_backup" "$sshd_cfg"
+        if [[ "$existed_dropin" == yes ]]; then cp -p -- "$dropin_backup" "$dropin"; else rm -f -- "$dropin"; fi
+        if [[ "$unit" == *.socket ]]; then
+            if [[ "$existed_socket" == yes ]]; then cp -p -- "$socket_backup" "$socket_dropin"; else rm -f -- "$socket_dropin"; fi
+            systemctl daemon-reload >/dev/null 2>&1
+            systemctl restart "$unit" >/dev/null 2>&1
+        else
+            systemctl restart "$unit" >/dev/null 2>&1
+        fi
+        [[ "$ufw_added" == yes ]] && echo y | ufw delete allow "$new_port/tcp" >/dev/null 2>&1
+        unset goto_ssh_port_rollback
+        red "Откат выполнен. Старые настройки SSH восстановлены; проверьте доступ из второй сессии."
+        return 1
+    fi
+
+    rm -f -- "$cfg_backup" "$dropin_backup" "$socket_backup"
+    unset goto_ssh_port_rollback
+    purple "Порт SSH изменён на $new_port. Старый порт удалён из конфигурации sshd."
+    if [[ -f /etc/fail2ban/jail.local ]] && ! grep -qE "^[[:space:]]*port[[:space:]]*=[[:space:]]*${new_port}([,[:space:]]|$)" /etc/fail2ban/jail.local; then
+        yellow "Проверьте порт Fail2ban: /etc/fail2ban/jail.local."
+    fi
 }
 
 # ============================================================

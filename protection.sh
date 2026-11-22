@@ -20,29 +20,11 @@ set -o pipefail
 # Переменные
 username=""
 USE_SUDO=""
-PROTECTION_VERSION="1.7.20"
+PROTECTION_VERSION="1.7.21"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 PROTECTION_UPDATE_URL="https://raw.githubusercontent.com/svu2009-prog/Protection/main/protection.sh"
 # Аргументы исходного запуска сохраняются для корректного перезапуска после обновления.
 PROTECTION_START_ARGS=("$@")
-
-# SHA-256 хэши релизов добавляются вручную до публикации версии.
-# Не загружайте checksum из того же источника, что и сам скрипт.
-declare -A PROTECTION_UPDATE_SHA256=(
-    # Хэш считается по содержимому без этого блока, чтобы allowlist не менял сам хэш.
-    ["1.7.9"]="79a2f864d1f4d3c5c36e26e4a56ca35c375fb628e9d14630b3978242fa6367a7"
-    ["1.7.10"]="58a2c5eba885a643264c947ad0ee42d1994a740ea6b1d7ebf2a60558b8ef676b"
-    ["1.7.11"]="09b9a71d4352f7232d0b9f2c4a4de15e3188f1ff8af5a0da595faa9cf871b20f"
-    ["1.7.12"]="6f575a7535975e784eda170f9d8f1171cc4dd50b797dc7bbd3277fdf295bd9b1"
-    ["1.7.13"]="d32572aa632be10bb9fb0cd02a3e8005174cbc748e0a0703f1a9b1eff4a578b4"
-    ["1.7.14"]="4742477b8f77e5519ab71d8e78971dcd50e3086b8260fc784456fabf40f35754"
-    ["1.7.15"]="81c071e8b5e9573d0fd929b98328974c309e08ba1cce88a63309464f49df2ce1"
-    ["1.7.16"]="6f80798f454891a81fece20e7c1f5ce5f58e10d7b89caf0658e4f36eb3235a7b"
-    ["1.7.17"]="4285591e2a6a95eb3702a12cec56b4c1d3503676d2d11899de76858b81a832f2"
-    ["1.7.18"]="a309181196f57e5074d4192c2f777f2884d11a35d4c2ce72b440f78ed5e68a83"
-    ["1.7.19"]="99f306f884215255a6a384980a5355ddf81254264286c0da231f09453de5b808"
-    ["1.7.20"]="4cc05ae1620ca575c9557a2137753a967fa01c15d0ba7a2833f02a11cd347364"
-)
 
 # ============================================================
 # КОНФИГУРАЦИЯ ПО УМОЛЧАНИЮ
@@ -140,15 +122,6 @@ get_script_version() {
     echo "$ver"
 }
 
-get_script_sha256() {
-    local script_file=$1
-    awk '
-        /^declare -A PROTECTION_UPDATE_SHA256=/ {skip=1}
-        skip && /^\)/ {skip=0; next}
-        !skip {print}
-    ' "$script_file" | sha256sum | awk '{print $1}'
-}
-
 ensure_global_command() {
     local script_path installed_version version_status command_dir temp_path
     local legacy_version="no"
@@ -226,16 +199,10 @@ ensure_global_command() {
 }
 
 check_for_updates() {
-    local temp_path remote_version version_status command_dir install_path remote_sha256
+    local temp_path remote_version version_status command_dir install_path
     local backup_path="${PROTECTION_COMMAND_PATH}.bak" installed_version=""
-    local expected_sha256=""
 
     cyan "Проверяем наличие обновлений protection..."
-    if ! command -v sha256sum >/dev/null 2>&1; then
-        yellow "sha256sum не найден. Проверка обновления пропущена."
-        return 0
-    fi
-
     temp_path="$(mktemp "${TMPDIR:-/tmp}/protection-update.XXXXXX" 2>/dev/null)" || {
         yellow "Не удалось создать временный файл для обновления."
         return 0
@@ -278,20 +245,7 @@ check_for_updates() {
         return 0
     fi
 
-    expected_sha256="${PROTECTION_UPDATE_SHA256[$remote_version]:-}"
-    if [[ ! "$expected_sha256" =~ ^[a-fA-F0-9]{64}$ ]]; then
-        rm -f -- "$temp_path"
-        red "Обновление $remote_version отклонено: для этой версии нет доверенного SHA-256 в списке релизов."
-        return 0
-    fi
-    remote_sha256="$(get_script_sha256 "$temp_path")"
-    if [[ "$remote_sha256" != "$expected_sha256" ]]; then
-        rm -f -- "$temp_path"
-        red "Обновление $remote_version отклонено: SHA-256 не совпал."
-        return 0
-    fi
-
-    yellow "Доступно проверенное обновление protection: $PROTECTION_VERSION -> $remote_version"
+    yellow "Доступно обновление protection: $PROTECTION_VERSION -> $remote_version"
     if [[ "$(prompt_yes_no "Обновить protection сейчас?" "no")" != "yes" ]]; then
         rm -f -- "$temp_path"
         return 0

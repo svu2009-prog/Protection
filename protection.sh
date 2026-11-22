@@ -20,7 +20,7 @@ set -o pipefail
 # Переменные
 username=""
 USE_SUDO=""
-PROTECTION_VERSION="1.7.21"
+PROTECTION_VERSION="1.7.22"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 PROTECTION_UPDATE_URL="https://raw.githubusercontent.com/svu2009-prog/Protection/main/protection.sh"
 # Аргументы исходного запуска сохраняются для корректного перезапуска после обновления.
@@ -1122,10 +1122,12 @@ show_server_ip() {
     
     if command -v ip &>/dev/null; then
         yellow "IPv4:"
-        # Показываем только IP физических сетевых интерфейсов (eth, ens, enp, eno)
-        # Исключаем loopback (lo), docker, virbr, veth, wg и т.д.
-        # Исключаем Docker подсети: 172.17.0.0/16, 172.18.0.0/16, 10.0.0.0/8 (если используется Docker)
-        ip -4 addr show 2>/dev/null | awk '/^[0-9]+: (eth|ens|enp|eno)/ {iface=1} /^[0-9]+: / && !/^[0-9]+: (eth|ens|enp|eno)/ {iface=0} iface && /inet / {print $2}' | cut -d'/' -f1 | grep -v '^172\.1[67]\.' | grep -v '^172\.1[89]\.' | while read -r ip; do
+        # Показываем глобальные IPv4 физических интерфейсов, включая enx/bond и другие имена.
+        # Виртуальные интерфейсы исключаем по имени, а не по диапазону IP:
+        # приватный адрес может быть реальным адресом самого сервера.
+        ip -4 -o addr show scope global 2>/dev/null |
+            awk '$2 !~ /^(docker[0-9]*|br-|virbr|veth|wg[0-9]*|tun[0-9]*|tap[0-9]*|lo$|cni|flannel)/ {sub(/@.*/, "", $2); print $4}' |
+            cut -d'/' -f1 | while read -r ip; do
             echo "  $ip"
         done
         
@@ -1142,10 +1144,9 @@ show_server_ip() {
         fi
     elif command -v ifconfig &>/dev/null; then
         yellow "IPv4:"
-        # Показываем только IP физических сетевых интерфейсов
-        # Исключаем Docker подсети
-        for iface in $(ifconfig -s 2>/dev/null | awk 'NR>1 && $1 ~ /^(eth|ens|enp|eno)/ {print $1}'); do
-            ifconfig "$iface" 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '^172\.1[67]\.' | grep -v '^172\.1[89]\.' | while read -r ip; do
+        # Запасной вариант для систем без ip; поддерживаем физические, bond и enx-интерфейсы.
+        for iface in $(ifconfig -s 2>/dev/null | awk 'NR>1 && $1 !~ /^(lo|docker[0-9]*|br-|virbr|veth|wg[0-9]*|tun[0-9]*|tap[0-9]*|cni|flannel)/ {print $1}'); do
+            ifconfig "$iface" 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | while read -r ip; do
                 echo "  $ip"
             done
         done
@@ -2052,7 +2053,12 @@ change_port_ssh() {
             return 1
         fi
         # Пустой ListenStream сбрасывает все ListenStream из unit и предыдущих drop-in.
-        if ! printf '[Socket]\nListenStream=\nListenStream=0.0.0.0:%s\nListenStream=[::]:%s\n' "$new_port" "$new_port" > "$socket_dropin" ||
+        local socket_listeners
+        socket_listeners="ListenStream=0.0.0.0:${new_port}"
+        if ipv6_stack_available && ! ipv6_interfaces_have_value 1; then
+            socket_listeners+=$'\nListenStream=[::]:'"$new_port"
+        fi
+        if ! printf '[Socket]\nListenStream=\n%s\n' "$socket_listeners" > "$socket_dropin" ||
             ! systemctl daemon-reload || ! systemctl restart "$unit"; then
             red "Не удалось применить новый порт через $unit. Выполняется откат."
             goto_ssh_port_rollback=1

@@ -20,7 +20,7 @@ set -o pipefail
 # Переменные
 username=""
 USE_SUDO=""
-PROTECTION_VERSION="1.7.19"
+PROTECTION_VERSION="1.7.20"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 PROTECTION_UPDATE_URL="https://raw.githubusercontent.com/svu2009-prog/Protection/main/protection.sh"
 # Аргументы исходного запуска сохраняются для корректного перезапуска после обновления.
@@ -41,6 +41,7 @@ declare -A PROTECTION_UPDATE_SHA256=(
     ["1.7.17"]="4285591e2a6a95eb3702a12cec56b4c1d3503676d2d11899de76858b81a832f2"
     ["1.7.18"]="a309181196f57e5074d4192c2f777f2884d11a35d4c2ce72b440f78ed5e68a83"
     ["1.7.19"]="99f306f884215255a6a384980a5355ddf81254264286c0da231f09453de5b808"
+    ["1.7.20"]="4cc05ae1620ca575c9557a2137753a967fa01c15d0ba7a2833f02a11cd347364"
 )
 
 # ============================================================
@@ -2097,7 +2098,7 @@ change_port_ssh() {
             return 1
         fi
         # Пустой ListenStream сбрасывает все ListenStream из unit и предыдущих drop-in.
-        if ! printf '[Socket]\nListenStream=\nListenStream=%s\n' "$new_port" > "$socket_dropin" ||
+        if ! printf '[Socket]\nListenStream=\nListenStream=0.0.0.0:%s\nListenStream=[::]:%s\n' "$new_port" "$new_port" > "$socket_dropin" ||
             ! systemctl daemon-reload || ! systemctl restart "$unit"; then
             red "Не удалось применить новый порт через $unit. Выполняется откат."
             goto_ssh_port_rollback=1

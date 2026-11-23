@@ -20,7 +20,7 @@ set -o pipefail
 # Переменные
 username=""
 USE_SUDO=""
-PROTECTION_VERSION="1.7.24"
+PROTECTION_VERSION="1.7.25"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 PROTECTION_UPDATE_URL="https://raw.githubusercontent.com/svu2009-prog/Protection/main/protection.sh"
 # Аргументы исходного запуска сохраняются для корректного перезапуска после обновления.
@@ -1001,11 +1001,7 @@ repair_grub_ipv6_disable() {
     fi
     purple "Конфигурация GRUB успешно обновлена."
 
-    if [[ "$(prompt_yes_no "Перезагрузить сервер сейчас для включения IPv6?" "no")" == "yes" ]]; then
-        ${USE_SUDO:+$USE_SUDO }reboot
-    else
-        yellow "Перезагрузите сервер вручную, чтобы изменения вступили в силу."
-    fi
+    yellow "Перезагрузите сервер вручную после проверки IPv4 и SSH, чтобы изменения вступили в силу."
     return 1
 }
 
@@ -2103,12 +2099,10 @@ change_port_ssh() {
             return 1
         fi
         # Пустой ListenStream сбрасывает все ListenStream из unit и предыдущих drop-in.
-        local socket_listeners
-        socket_listeners="ListenStream=0.0.0.0:${new_port}"
-        if ipv6_stack_available && ! ipv6_interfaces_have_value 1; then
-            socket_listeners+=$'\nListenStream=[::]:'"$new_port"
-        fi
-        if ! printf '[Socket]\nListenStream=\n%s\n' "$socket_listeners" > "$socket_dropin" ||
+        # Оба адреса задаются явно: IPv4 не должен исчезать из socket drop-in.
+        if ! printf '[Socket]\nListenStream=\nListenStream=0.0.0.0:%s\nListenStream=[::]:%s\n' "$new_port" "$new_port" > "$socket_dropin" ||
+            ! grep -Fqx "ListenStream=0.0.0.0:${new_port}" "$socket_dropin" ||
+            ! grep -Fqx "ListenStream=[::]:${new_port}" "$socket_dropin" ||
             ! systemctl daemon-reload || ! systemctl restart "$unit"; then
             red "Не удалось применить новый порт через $unit. Выполняется откат."
             goto_ssh_port_rollback=1
@@ -2125,7 +2119,11 @@ change_port_ssh() {
             effective_ports="$(sshd -T 2>/dev/null | awk '$1=="port" {print $2}' | sort -nu)"
             if [[ "$unit" == *.socket ]]; then
                 listener_ok="no"
-                if command -v ss >/dev/null 2>&1 && ss -H -ltn 2>/dev/null | awk -v p=":$new_port" '$4 ~ (p "$") {found=1} END {exit !found}'; then listener_ok="yes"; fi
+                if command -v ss >/dev/null 2>&1 &&
+                    ss -H -ltn 2>/dev/null | awk -v p=":$new_port" '$4 == "0.0.0.0" p || $4 == "*" p {found=1} END {exit !found}' &&
+                    ss -H -ltn 2>/dev/null | awk -v p=":$new_port" '$4 == "[::]" p {found=1} END {exit !found}'; then
+                    listener_ok="yes"
+                fi
             elif printf '%s\n' "$effective_ports" | grep -Fxq "$new_port" && port_in_use "$new_port"; then
                 listener_ok="yes"
             fi

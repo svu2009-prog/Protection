@@ -20,7 +20,7 @@ set -o pipefail
 # Переменные
 username=""
 USE_SUDO=""
-PROTECTION_VERSION="1.7.23"
+PROTECTION_VERSION="1.7.24"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 PROTECTION_UPDATE_URL="https://raw.githubusercontent.com/svu2009-prog/Protection/main/protection.sh"
 # Аргументы исходного запуска сохраняются для корректного перезапуска после обновления.
@@ -963,6 +963,52 @@ ensure_ipv6_module_autoload() {
     fi
 }
 
+# Удаление ipv6.disable=1 из источника параметров GRUB.
+repair_grub_ipv6_disable() {
+    local grub_file found=0
+
+    export PATH="$PATH:/usr/sbin:/sbin"
+
+    for grub_file in /etc/default/grub /etc/default/grub.d/*.cfg; do
+        [[ -f "$grub_file" ]] || continue
+        if grep -Eq '^[[:space:]]*GRUB_CMDLINE_(LINUX|LINUX_DEFAULT)=.*ipv6\.disable=1' "$grub_file"; then
+            if ! ${USE_SUDO:+$USE_SUDO }cp -p "$grub_file" "$grub_file.protection.bak"; then
+                red "Не удалось создать резервную копию $grub_file."
+                return 1
+            fi
+            if ! ${USE_SUDO:+$USE_SUDO }sed -i -E '/^[[:space:]]*GRUB_CMDLINE_(LINUX|LINUX_DEFAULT)=/ s/ipv6\.disable=1[[:space:]]*//g' "$grub_file"; then
+                red "Не удалось изменить $grub_file."
+                return 1
+            fi
+            purple "Параметр ipv6.disable=1 удалён из $grub_file."
+            found=1
+        fi
+    done
+
+    if (( ! found )); then
+        yellow "Параметр ipv6.disable=1 не найден в /etc/default/grub и /etc/default/grub.d/*.cfg."
+        yellow "Проверьте источник параметров загрузки вручную."
+        return 1
+    fi
+
+    if ! command -v update-grub &>/dev/null; then
+        red "Команда update-grub не найдена. Конфигурация GRUB не обновлена."
+        return 1
+    fi
+    if ! ${USE_SUDO:+$USE_SUDO }update-grub; then
+        red "Не удалось обновить конфигурацию GRUB."
+        return 1
+    fi
+    purple "Конфигурация GRUB успешно обновлена."
+
+    if [[ "$(prompt_yes_no "Перезагрузить сервер сейчас для включения IPv6?" "no")" == "yes" ]]; then
+        ${USE_SUDO:+$USE_SUDO }reboot
+    else
+        yellow "Перезагрузите сервер вручную, чтобы изменения вступили в силу."
+    fi
+    return 1
+}
+
 # Проверка и загрузка модуля ядра ipv6.
 # Возвращает 0, если IPv6-стек доступен (sysctl-ключи существуют), иначе 1.
 ensure_ipv6_module() {
@@ -974,8 +1020,13 @@ ensure_ipv6_module() {
     # Ядро загружено с ipv6.disable=1 — модуль не поможет, нужны правки параметров загрузки
     if grep -q 'ipv6.disable=1' /proc/cmdline 2>/dev/null; then
         red "Ядро загружено с параметром ipv6.disable=1 (/proc/cmdline) — IPv6 отключен на уровне ядра."
-        red "Удалите ipv6.disable=1 из параметров загрузки (GRUB) и перезагрузите сервер."
-        return 1
+        if [[ "$(prompt_yes_no "Удалить ipv6.disable=1 из параметров GRUB?" "yes")" == "yes" ]]; then
+            repair_grub_ipv6_disable
+            return 1
+        else
+            yellow "Удалите ipv6.disable=1 из параметров загрузки (GRUB) и перезагрузите сервер."
+            return 1
+        fi
     fi
 
     # modprobe может отсутствовать в PATH при нестандартном окружении — добавляем стандартные пути
@@ -1176,7 +1227,6 @@ show_server_ip() {
 disable_ipv6() {
     # Без модуля ipv6 sysctl-ключи недоступны — включение/отключение IPv6 не работает
     if ! ensure_ipv6_module; then
-        red "Модуль IPv6 не установлен/не загружен. Включение/отключение IPv6 невозможно."
         return 1
     fi
 

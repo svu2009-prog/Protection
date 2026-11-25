@@ -20,7 +20,7 @@ set -o pipefail
 # Переменные
 username=""
 USE_SUDO=""
-PROTECTION_VERSION="1.7.25"
+PROTECTION_VERSION="1.7.26"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 PROTECTION_UPDATE_URL="https://raw.githubusercontent.com/svu2009-prog/Protection/main/protection.sh"
 # Аргументы исходного запуска сохраняются для корректного перезапуска после обновления.
@@ -539,6 +539,118 @@ port_in_use() {
     return 1
 }
 
+# Есть ли у порта IPv4-слушатель (0.0.0.0:PORT, конкретный не-loopback IPv4 или dual-stack *:PORT).
+# Если проверить нечем (нет ни ss, ни netstat) — не блокируем действие (return 0).
+ssh_ipv4_listening() {
+    local port=$1 out
+    if command -v ss &>/dev/null; then
+        out=$(ss -H -ltn 2>/dev/null)
+    elif command -v netstat &>/dev/null; then
+        out=$(netstat -ltn 2>/dev/null)
+    else
+        return 0
+    fi
+    printf '%s\n' "$out" | awk -v port="$port" '
+        $4 !~ /^127\./ && $4 ~ ("^([0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+|\\*):" port "$") { found=1 }
+        END { exit !found }'
+}
+
+# Можно ли безопасно добавлять [::] в ListenStream: IPv6-стек есть и не отключен параметром ядра.
+ipv6_listen_supported() {
+    ipv6_stack_available && [[ -e /proc/net/if_inet6 ]] &&
+        ! grep -q 'ipv6.disable=1' /proc/cmdline 2>/dev/null
+}
+
+# Установить одну директиву в drop-in файле, СОХРАНИВ остальные строки файла.
+# Аргументы: файл, ключ, значение. Запись атомарная (tmp + mv).
+sshd_dropin_set() {
+    local file=$1 key=$2 value=$3 tmp
+    tmp=$(mktemp "${file}.XXXXXX") || return 1
+    {
+        if [[ -f "$file" ]]; then
+            grep -viE "^[[:space:]]*${key}[[:space:]]" "$file" || true
+        fi
+        printf '%s %s\n' "$key" "$value"
+    } > "$tmp" && chmod 644 "$tmp" && mv -f -- "$tmp" "$file" || {
+        rm -f -- "$tmp"
+        return 1
+    }
+}
+
+# Записать socket drop-in с явными IPv4 (всегда) и IPv6 (если доступен) адресами для списка портов.
+# Аргументы: файл, затем порты. Пустой ListenStream= сбрасывает адреса из unit и других drop-in.
+write_ssh_socket_dropin() {
+    local file=$1 port
+    shift
+    {
+        printf '[Socket]\nListenStream=\n'
+        for port in "$@"; do
+            printf 'ListenStream=0.0.0.0:%s\n' "$port"
+            if ipv6_listen_supported; then
+                printf 'ListenStream=[::]:%s\n' "$port"
+            fi
+        done
+    } > "$file"
+}
+
+# Проверка, что SSH слушает IPv4 на всех своих портах. В socket-режиме предлагает исправить drop-in.
+verify_ssh_ipv4() {
+    local mode unit port missing="" dropin backup="" existed="no" ports=()
+    mode="$(detect_ssh_mode 2>/dev/null || true)"
+    [[ -n "$mode" ]] || return 0
+
+    mapfile -t ports < <(get_ssh_ports)
+    for port in "${ports[@]}"; do
+        [[ -n "$port" ]] || continue
+        ssh_ipv4_listening "$port" || missing="$missing $port"
+    done
+    [[ -z "$missing" ]] && return 0
+
+    red "ВНИМАНИЕ: SSH не слушает IPv4 на портах:$missing"
+    if [[ "$mode" != socket:* ]]; then
+        yellow "Проверьте в sshd_config директивы AddressFamily и ListenAddress (sshd -T | grep -Ei 'addressfamily|listenaddress')."
+        return 1
+    fi
+
+    unit="${mode#socket:}"
+    dropin="/etc/systemd/system/${unit}.d/zz-protection-port.conf"
+    yellow "SSH работает через $unit; в ListenStream, вероятно, нет IPv4-адреса (только [::])."
+    if [[ "$(prompt_yes_no "Записать явные ListenStream для IPv4 и IPv6 и перезапустить $unit?" "yes")" != "yes" ]]; then
+        return 1
+    fi
+
+    mkdir -p "$(dirname "$dropin")" || { red "Не удалось создать каталог $(dirname "$dropin")."; return 1; }
+    if [[ -f "$dropin" ]]; then
+        existed="yes"
+        backup=$(mktemp "$(dirname "$dropin")/.zz-protection-port.XXXXXX.bak") || { red "Не удалось создать резервную копию $dropin."; return 1; }
+        cp -p -- "$dropin" "$backup" || { rm -f -- "$backup"; red "Не удалось создать резервную копию $dropin."; return 1; }
+    fi
+
+    if write_ssh_socket_dropin "$dropin" "${ports[@]}" && systemctl daemon-reload && systemctl restart "$unit"; then
+        missing=""
+        for port in "${ports[@]}"; do
+            for _ in {1..20}; do
+                ssh_ipv4_listening "$port" && break
+                sleep 0.25
+            done
+            ssh_ipv4_listening "$port" || missing="$missing $port"
+        done
+    else
+        missing="${ports[*]}"
+    fi
+
+    if [[ -n "$missing" ]]; then
+        red "Не удалось восстановить IPv4-слушатель. Выполняется откат $dropin."
+        if [[ "$existed" == yes ]]; then cp -p -- "$backup" "$dropin"; else rm -f -- "$dropin"; fi
+        systemctl daemon-reload >/dev/null 2>&1
+        systemctl restart "$unit" >/dev/null 2>&1
+        [[ -n "$backup" ]] && rm -f -- "$backup"
+        return 1
+    fi
+    [[ -n "$backup" ]] && rm -f -- "$backup"
+    purple "IPv4-слушатель SSH восстановлен ($unit)."
+}
+
 # Короткий статус службы
 service_short_status() {
     local svc=$1
@@ -583,7 +695,10 @@ precheck() {
 
     ensure_global_command
     check_for_updates "$@"
-    
+
+    # Самопроверка при запуске: SSH должен слушать IPv4 (частая проблема: в socket drop-in остаётся только [::]).
+    verify_ssh_ipv4
+
     main
 }
 
@@ -1318,6 +1433,19 @@ get_non_system_users() {
     getent passwd | awk -F: '$3 >= 1000 && $3 < 65534 && $1 != "ubuntu" && $7 !~ /(nologin|false|sync|halt|shutdown)$/ {print $1}'
 }
 
+# Является ли пользователь единственным администратором (sudo/admin) среди несистемных пользователей.
+is_last_admin_user() {
+    local target=$1 u
+    id -nG "$target" 2>/dev/null | grep -Eq '(^| )(sudo|admin)( |$)' || return 1
+    while IFS= read -r u; do
+        [[ -n "$u" && "$u" != "$target" ]] || continue
+        if id -nG "$u" 2>/dev/null | grep -Eq '(^| )(sudo|admin)( |$)'; then
+            return 1
+        fi
+    done < <(get_non_system_users)
+    return 0
+}
+
 # Выбор несистемного пользователя. $1="manual" — добавить ручной ввод имени,
 # $2="create" — добавить пункт создания нового пользователя (в группы sudo и docker).
 select_non_system_user() {
@@ -1379,8 +1507,9 @@ select_non_system_user() {
                 SELECTED_USER="$manual_user"
                 return 0
             elif [[ "$allow_create" == "create" && "$user_num" -eq "$create_index" ]]; then
+                username=""
                 new_user docker
-                if id "$username" &>/dev/null; then
+                if [[ -n "$username" ]] && id "$username" &>/dev/null; then
                     SELECTED_USER="$username"
                     return 0
                 fi
@@ -1476,6 +1605,13 @@ users_menu() {
                 ;;
             8)
                 if select_non_system_user; then
+                    if is_last_admin_user "$SELECTED_USER"; then
+                        red "ВНИМАНИЕ: $SELECTED_USER — единственный пользователь с правами sudo/admin."
+                        yellow "После удаления вы можете потерять административный доступ (особенно если вход root по SSH отключен)."
+                        if [[ "$(prompt_yes_no "Всё равно продолжить удаление?" "no")" != "yes" ]]; then
+                            continue
+                        fi
+                    fi
                     if [[ "$(prompt_yes_no "Удалить пользователя $SELECTED_USER и его домашний каталог?" "no")" == "yes" ]]; then
                         local sudoers_file="/etc/sudoers.d/$SELECTED_USER"
                         local sudoers_backup=""
@@ -1509,7 +1645,7 @@ users_menu() {
                 break
                 ;;
             *)
-                yellow "Введите число от 0 до 9 и нажмите ENTER"
+                yellow "Введите число от 0 до 8 и нажмите ENTER"
                 ;;
         esac
     done
@@ -1616,15 +1752,16 @@ restore_sshd_dropin() {
 # Проверка наличия другого рабочего способа входа по SSH с правами администратора.
 # Пароль учитывается только при явно разрешенной PasswordAuthentication.
 has_alternative_ssh_access() {
-    local user uid shell home password_auth status
+    local user uid shell home password_auth pubkey_auth status
     password_auth=$(sshd -T 2>/dev/null | awk '/^passwordauthentication/ {print $2; exit}')
+    pubkey_auth=$(sshd -T 2>/dev/null | awk '/^pubkeyauthentication/ {print $2; exit}')
 
     while IFS=: read -r user _ uid _ _ home shell; do
         [[ "$uid" =~ ^[0-9]+$ && "$uid" -ge 1000 && "$uid" -lt 65534 ]] || continue
         [[ "$shell" != */nologin && "$shell" != */false && -x "$shell" ]] || continue
         id -nG "$user" 2>/dev/null | grep -Eq '(^| )(sudo|admin)( |$)' || continue
 
-        if [[ -s "$home/.ssh/authorized_keys" ]]; then
+        if [[ "$pubkey_auth" != "no" && -s "$home/.ssh/authorized_keys" ]]; then
             return 0
         fi
         if [[ "$password_auth" == "yes" ]]; then
@@ -1715,6 +1852,10 @@ toggle_pubkey_auth() {
     [[ -z "$current_val" ]] && current_val="yes"
 
     if [[ "$current_val" == "yes" ]]; then
+        if [[ "$(sshd -T 2>/dev/null | awk '/^passwordauthentication/ {print $2; exit}')" != "yes" ]]; then
+            red "Отключение ключей отменено: вход по паролю (PasswordAuthentication) не разрешён, вы потеряете SSH-доступ."
+            return 1
+        fi
         yellow "ВНИМАНИЕ: После отключения аутентификации по ключу вход будет возможен только по паролю."
         yellow "Убедитесь, что вход по паролю разрешён и пароль задан, ПРЕЖДЕ чем отключать ключи."
         yellow "Проверьте вход по паролю в отдельном терминале, не закрывая этот сеанс."
@@ -1910,8 +2051,8 @@ set_permit_root_login() {
         cp -p -- "$sshd_dropin" "$backup" || { rm -f -- "$backup"; red "Не удалось создать резервную копию SSH drop-in."; return 1; }
     fi
     
-    # Пишем значение в drop-in файл (перезаписываем, если существует)
-    if ! printf 'PermitRootLogin %s\n' "$value" > "$sshd_dropin"; then
+    # Меняем только PermitRootLogin, остальные директивы (Port, PubkeyAuthentication) сохраняются
+    if ! sshd_dropin_set "$sshd_dropin" PermitRootLogin "$value"; then
         restore_sshd_dropin "$sshd_dropin" "$backup" "$existed" || red "Требуется ручная проверка конфигурации SSH после неудачного отката."
         [[ -n "$backup" ]] && rm -f -- "$backup"
         red "Не удалось изменить PermitRootLogin."
@@ -1987,8 +2128,10 @@ change_port_ssh() {
     local new_port current_port mode unit sshd_cfg dropin socket_dropin
     local cfg_backup dropin_backup socket_backup existed_dropin="no" existed_socket="no"
     local ufw_added="no" tmp effective_ports listener_ok="no" old_ports
+    local ipv6_listen="no" ipv4_before="no"
 
     current_port="$(get_ssh_port)"
+    ssh_ipv4_listening "$current_port" && ipv4_before="yes"
     if [[ "$(prompt_yes_no "Порты SSH = $(get_ssh_ports | paste -sd, -). Изменить порт?" "no")" != "yes" ]]; then
         return 0
     fi
@@ -2079,7 +2222,8 @@ change_port_ssh() {
         return 1
     fi
 
-    if ! printf 'Port %s\n' "$new_port" > "$dropin"; then
+    # Меняем только Port, остальные директивы drop-in (PermitRootLogin, PubkeyAuthentication) сохраняются
+    if ! sshd_dropin_set "$dropin" Port "$new_port"; then
         cp -p -- "$cfg_backup" "$sshd_cfg"
         if [[ "$existed_dropin" == yes ]]; then cp -p -- "$dropin_backup" "$dropin"; else rm -f -- "$dropin"; fi
         [[ "$ufw_added" == yes ]] && echo y | ufw delete allow "$new_port/tcp" >/dev/null 2>&1
@@ -2092,20 +2236,24 @@ change_port_ssh() {
             red "Конфигурация sshd не прошла проверку. Изменение отменяется."
             goto_ssh_port_rollback=1
         fi
-        if [[ "${goto_ssh_port_rollback:-0}" != 1 ]] && ! mkdir -p "$(dirname "$socket_dropin")"; then
-            cp -p -- "$cfg_backup" "$sshd_cfg"
-            if [[ "$existed_dropin" == yes ]]; then cp -p -- "$dropin_backup" "$dropin"; else rm -f -- "$dropin"; fi
-            [[ "$ufw_added" == yes ]] && echo y | ufw delete allow "$new_port/tcp" >/dev/null 2>&1
-            return 1
-        fi
-        # Пустой ListenStream сбрасывает все ListenStream из unit и предыдущих drop-in.
-        # Оба адреса задаются явно: IPv4 не должен исчезать из socket drop-in.
-        if ! printf '[Socket]\nListenStream=\nListenStream=0.0.0.0:%s\nListenStream=[::]:%s\n' "$new_port" "$new_port" > "$socket_dropin" ||
-            ! grep -Fqx "ListenStream=0.0.0.0:${new_port}" "$socket_dropin" ||
-            ! grep -Fqx "ListenStream=[::]:${new_port}" "$socket_dropin" ||
-            ! systemctl daemon-reload || ! systemctl restart "$unit"; then
-            red "Не удалось применить новый порт через $unit. Выполняется откат."
-            goto_ssh_port_rollback=1
+        if [[ "${goto_ssh_port_rollback:-0}" != 1 ]]; then
+            if ! mkdir -p "$(dirname "$socket_dropin")"; then
+                cp -p -- "$cfg_backup" "$sshd_cfg"
+                if [[ "$existed_dropin" == yes ]]; then cp -p -- "$dropin_backup" "$dropin"; else rm -f -- "$dropin"; fi
+                [[ "$ufw_added" == yes ]] && echo y | ufw delete allow "$new_port/tcp" >/dev/null 2>&1
+                return 1
+            fi
+            # Пустой ListenStream сбрасывает все ListenStream из unit и предыдущих drop-in.
+            # IPv4-адрес (0.0.0.0) пишется ВСЕГДА; [::] — только если IPv6-стек доступен,
+            # иначе socket unit может не запуститься и SSH пропадёт целиком.
+            ipv6_listen_supported && ipv6_listen="yes"
+            if ! write_ssh_socket_dropin "$socket_dropin" "$new_port" ||
+                ! grep -Fqx "ListenStream=0.0.0.0:${new_port}" "$socket_dropin" ||
+                { [[ "$ipv6_listen" == yes ]] && ! grep -Fqx "ListenStream=[::]:${new_port}" "$socket_dropin"; } ||
+                ! systemctl daemon-reload || ! systemctl restart "$unit"; then
+                red "Не удалось применить новый порт через $unit. Выполняется откат."
+                goto_ssh_port_rollback=1
+            fi
         fi
     else
         if ! sshd -t 2>/dev/null || ! systemctl restart "$unit"; then
@@ -2117,15 +2265,17 @@ change_port_ssh() {
     if [[ "${goto_ssh_port_rollback:-0}" != 1 ]]; then
         for _ in {1..20}; do
             effective_ports="$(sshd -T 2>/dev/null | awk '$1=="port" {print $2}' | sort -nu)"
+            listener_ok="no"
             if [[ "$unit" == *.socket ]]; then
-                listener_ok="no"
-                if command -v ss >/dev/null 2>&1 &&
-                    ss -H -ltn 2>/dev/null | awk -v p=":$new_port" '$4 == "0.0.0.0" p || $4 == "*" p {found=1} END {exit !found}' &&
-                    ss -H -ltn 2>/dev/null | awk -v p=":$new_port" '$4 == "[::]" p {found=1} END {exit !found}'; then
+                # IPv4-слушатель обязателен; наличие IPv6 не требуем (dual-stack показывается как *:PORT).
+                if ssh_ipv4_listening "$new_port"; then
                     listener_ok="yes"
                 fi
             elif printf '%s\n' "$effective_ports" | grep -Fxq "$new_port" && port_in_use "$new_port"; then
-                listener_ok="yes"
+                # В режиме service IPv4 обязателен, если он был до изменения.
+                if [[ "$ipv4_before" != yes ]] || ssh_ipv4_listening "$new_port"; then
+                    listener_ok="yes"
+                fi
             fi
             [[ "$listener_ok" == yes ]] && break
             sleep 0.25
@@ -2152,6 +2302,20 @@ change_port_ssh() {
     rm -f -- "$cfg_backup" "$dropin_backup" "$socket_backup"
     unset goto_ssh_port_rollback
     purple "Порт SSH изменён на $new_port. Старый порт удалён из конфигурации sshd."
+    if [[ "$ipv6_listen" != yes && "$unit" == *.socket ]]; then
+        yellow "IPv6 недоступен: в socket drop-in записан только IPv4-адрес (0.0.0.0:$new_port)."
+    fi
+    if [[ "$current_port" != "$new_port" ]] && command -v ufw >/dev/null 2>&1 &&
+        ufw status 2>/dev/null | grep -q 'Status: active' && ufw_rule_exists "$current_port/tcp"; then
+        yellow "В UFW остаётся правило для старого порта $current_port/tcp. Проверьте вход на новый порт из второй сессии."
+        if [[ "$(prompt_yes_no "Удалить правило UFW для старого порта $current_port/tcp?" "no")" == "yes" ]]; then
+            if echo "y" | ufw delete allow "$current_port/tcp" >/dev/null 2>&1; then
+                purple "Правило $current_port/tcp удалено из UFW."
+            else
+                red "Не удалось удалить правило $current_port/tcp."
+            fi
+        fi
+    fi
     if [[ -f /etc/fail2ban/jail.local ]] && ! grep -qE "^[[:space:]]*port[[:space:]]*=[[:space:]]*${new_port}([,[:space:]]|$)" /etc/fail2ban/jail.local; then
         yellow "Проверьте порт Fail2ban: /etc/fail2ban/jail.local."
     fi
@@ -2442,7 +2606,7 @@ ufw_menu() {
                 break
                 ;;
             *)
-                yellow "Введите число от 0 до 10 и нажмите ENTER"
+                yellow "Введите число от 0 до 6 и нажмите ENTER"
                 ;;
         esac
     done
@@ -3523,6 +3687,13 @@ main() {
                 ;;
             *)
                 yellow "Введите число от 0 до 12 и нажмите ENTER"
+                ;;
+        esac
+
+        # После действий, которые могут повлиять на SSH/сеть, убеждаемся, что IPv4-доступ к SSH не потерян.
+        case "$NUMBER" in
+            3|6|7|9|10)
+                verify_ssh_ipv4
                 ;;
         esac
     done

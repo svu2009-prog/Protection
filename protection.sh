@@ -20,7 +20,7 @@ set -o pipefail
 # Переменные
 username=""
 USE_SUDO=""
-PROTECTION_VERSION="1.7.27"
+PROTECTION_VERSION="1.7.28"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 PROTECTION_UPDATE_URL="https://raw.githubusercontent.com/svu2009-prog/Protection/main/protection.sh"
 # Аргументы исходного запуска сохраняются для корректного перезапуска после обновления.
@@ -3019,8 +3019,12 @@ fail2ban_menu() {
                     ${USE_SUDO:+$USE_SUDO }grep -E "ssh|sshd|ssh2" /var/log/auth.log | tail -n 200
                 elif [[ -f /var/log/secure ]]; then
                     ${USE_SUDO:+$USE_SUDO }grep -E "ssh|sshd|ssh2" /var/log/secure | tail -n 200
+                elif command -v journalctl >/dev/null 2>&1 &&
+                    [[ -S /run/systemd/journal/socket ]] &&
+                    journalctl --quiet --no-pager -n 0 >/dev/null 2>&1; then
+                    journalctl --no-pager -n 200 -t sshd 2>/dev/null
                 else
-                    red "Не найден файл логов /var/log/auth.log или /var/log/secure."
+                    red "Не найден источник журналов SSH: нет /var/log/auth.log, /var/log/secure или работающего journald."
                 fi
                 ;;
             10)

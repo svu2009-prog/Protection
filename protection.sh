@@ -20,7 +20,7 @@ set -o pipefail
 # Переменные
 username=""
 USE_SUDO=""
-PROTECTION_VERSION="1.7.26"
+PROTECTION_VERSION="1.7.27"
 PROTECTION_COMMAND_PATH="/usr/local/bin/protection"
 PROTECTION_UPDATE_URL="https://raw.githubusercontent.com/svu2009-prog/Protection/main/protection.sh"
 # Аргументы исходного запуска сохраняются для корректного перезапуска после обновления.
@@ -2618,9 +2618,23 @@ ufw_menu() {
 
 # Создание /etc/fail2ban/jail.local с настройками по умолчанию
 generate_fail2ban_config() {
-    local CURRENT_SSH_PORT
+    local CURRENT_SSH_PORT ssh_backend ssh_logpath=""
     # Получаем текущий SSH порт для конфигурации
     CURRENT_SSH_PORT=$(get_ssh_port)
+
+    # Выбираем источник SSH-логов. journalctl может быть установлен без работающего journald.
+    if command -v journalctl >/dev/null 2>&1 &&
+        [[ -S /run/systemd/journal/socket ]] &&
+        journalctl --quiet --no-pager -n 0 >/dev/null 2>&1; then
+        ssh_backend="systemd"
+    elif [[ -f /var/log/auth.log ]]; then
+        ssh_backend="polling"
+        ssh_logpath="logpath = /var/log/auth.log"
+    else
+        red "Не найден источник журналов SSH: нет работающего journald и /var/log/auth.log."
+        yellow "Установите и запустите rsyslog либо включите systemd-journald, затем повторите настройку."
+        return 1
+    fi
 
     cat > /etc/fail2ban/jail.local <<EOF
 [DEFAULT]
@@ -2641,8 +2655,8 @@ backend = systemd
 enabled = true
 port = $CURRENT_SSH_PORT
 filter = sshd
-logpath = /var/log/auth.log
-backend = polling
+$ssh_logpath
+backend = $ssh_backend
 maxretry = 3
 findtime = $F2B_FINDTIME_DEFAULT
 bantime = $F2B_BANTIME_DEFAULT
@@ -2728,7 +2742,7 @@ install_fail2ban() {
         return 1
     fi
 
-    if ! ${USE_SUDO:+$USE_SUDO }fail2ban-client -t >/dev/null 2>&1; then
+    if ! ${USE_SUDO:+$USE_SUDO }fail2ban-client -t; then
         red "Конфигурация fail2ban не прошла проверку. Восстанавливаем резервную копию."
         if [[ "$jail_existed" == "yes" ]]; then
             cp -p -- "$jail_backup" "$jail_local"
@@ -2847,7 +2861,7 @@ edit_fail2ban_jail_local() {
     ${USE_SUDO:+$USE_SUDO }nano "$jail_local" </dev/tty
 
     # Проверка конфигурации после редактирования
-    if ! ${USE_SUDO:+$USE_SUDO }fail2ban-client -t >/dev/null 2>&1; then
+    if ! ${USE_SUDO:+$USE_SUDO }fail2ban-client -t; then
         red "Конфигурация fail2ban не прошла проверку после редактирования."
         if [[ "$(prompt_yes_no "Восстановить резервную копию jail.local?" "yes")" == "yes" ]]; then
             if cp "$jail_local_bak" "$jail_local"; then
